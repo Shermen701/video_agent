@@ -1,0 +1,67 @@
+agent:
+  agent_id: "recorder-001"
+  poll_interval_seconds: 15
+  prepare_before_minutes: 5
+  max_retries: 3
+
+platform:
+  base_url: "https://grcs-test.astronergy.com/"
+  api_token: ""
+  app_id: "iectp_collector"
+  app_secret: "490d886b456b423fb933ed2defacc73c"
+  tenant_id: 1
+  token_path: "/api/iectp/api/open/token"
+  pending_tasks_path: "/api/iectp/externalRecord/pendingTasks"
+  start_callback_path: "/api/iectp/externalRecord/startCallback"
+  complete_callback_path: "/api/iectp/externalRecord/completeCallback"
+  headers:
+    x-userid: "428724"
+    x-tenantId: "1"
+    x-accountno: "241024010"
+  provider_aliases:
+    腾讯会议: "tencent_meeting"
+    Tencent Meeting: "tencent_meeting"
+    钉钉: "dingtalk"
+    DingTalk: "dingtalk"
+    dingtalk: "dingtalk"
+  rsa_private_key_path: "config/iectp_rsa_private.pem"
+  rsa_public_key_path: "config/iectp_rsa_public.pem"
+  rsa_generate_if_missing: true
+  rsa_decrypt_passwords: true
+  timeout_seconds: 20
+
+obs:
+  executable_path: ""
+  websocket_host: "127.0.0.1"
+  websocket_port: 4455
+  websocket_password: ""
+  startup_timeout_seconds: 20
+  recordings_dir: "recordings"
+
+upload:
+  part_size_bytes: 5242880
+  retry_count: 3
+
+minio:
+  endpoint: "http://10.121.9.6:9000/"
+  access_key: "replace-me"
+  secret_key: "replace-me"
+  bucket_name: "xny-iectp"
+  secure: false
+  object_prefix: "external-record"
+
+providers:
+  tencent_meeting:
+    executable_path: ""
+    window_title_regex: "腾讯会议|Tencent Meeting"
+    login_retry_count: 2
+    join_retry_count: 2
+    meeting_end_poll_seconds: 5
+  dingtalk:
+    executable_path: ""
+    window_title_regex: "钉钉|DingTalk|Ding"
+    login_retry_count: 2
+    join_retry_count: 2
+    meeting_end_poll_seconds: 5
+    login_click_ratio: [0.5, 0.74]
+    home_join_click_ratio: [0.45, 0.42]
