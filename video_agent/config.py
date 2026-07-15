@@ -13,6 +13,7 @@ class AgentConfig:
     poll_interval_seconds: int = 15
     prepare_before_minutes: int = 5
     max_retries: int = 3
+    close_apps_after_task: bool = True
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,9 @@ class ObsConfig:
     websocket_host: str = "127.0.0.1"
     websocket_port: int = 4455
     websocket_password: str = ""
-    startup_timeout_seconds: int = 20
+    # OBS may take over 25 seconds to load video and the WebSocket plugin on a
+    # cold Windows start.  Keep the agent from failing a healthy launch early.
+    startup_timeout_seconds: int = 45
     recordings_dir: str = "recordings"
 
 

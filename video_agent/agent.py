@@ -47,8 +47,15 @@ class RecordingAgent:
         if is_expired(task, now) and smoke_record_seconds is None:
             self._report_failure(task, self._paths(task), ErrorCode.TASK_EXPIRED, "task end_time has passed")
             return
+        prepare_at = task.start_time - timedelta(minutes=self.config.agent.prepare_before_minutes)
         if smoke_record_seconds is None and not should_prepare(task, now, self.config.agent.prepare_before_minutes):
-            LOGGER.info("task %s is not ready yet", task.id)
+            LOGGER.info(
+                "task %s is not ready yet: now=%s start=%s prepare_at=%s",
+                task.id,
+                now.isoformat(),
+                task.start_time.isoformat(),
+                prepare_at.isoformat(),
+            )
             return
         self.execute_task(task, smoke_record_seconds=smoke_record_seconds)
 
@@ -57,11 +64,15 @@ class RecordingAgent:
         provider = None
         record_start_time = None
         record_end_time = None
+        recording_started = False
+        capture_configured = False
+        obs_touched = False
         paths.task_dir.mkdir(parents=True, exist_ok=True)
         paths.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self._write_metadata(task, paths)
         try:
             provider = create_provider(task.meeting_provider, self.config.providers)
+            obs_touched = True
             self.platform.report_status(task.id, TaskStatus.PREPARING, "preparing local applications")
             self.obs.ensure_running()
             self.obs.connect()
@@ -72,7 +83,14 @@ class RecordingAgent:
             provider.join(task.meeting)
             provider.prepare_audio_video()
 
+            get_capture_target = getattr(provider, "get_capture_target", None)
+            capture_target = get_capture_target() if callable(get_capture_target) else None
+            if capture_target is not None:
+                self.obs.configure_window_capture(capture_target)
+                capture_configured = True
+
             self.obs.start_recording(paths.task_dir)
+            recording_started = True
             record_start_time = utc_now()
             self.platform.report_status(
                 task.id,
@@ -90,7 +108,11 @@ class RecordingAgent:
                 )
             provider.wait_until_finished(recording_deadline)
             self.obs.stop_recording()
+            recording_started = False
             record_end_time = utc_now()
+            if capture_configured:
+                self.obs.restore_capture_scene()
+                capture_configured = False
 
             recording = self.obs.find_latest_recording(paths.task_dir)
             if recording is None:
@@ -126,11 +148,31 @@ class RecordingAgent:
                     LOGGER.exception("failed to capture provider diagnostics")
             self._report_failure(task, paths, _classify_error(exc), str(exc), screenshot, record_start_time, record_end_time)
         finally:
+            if recording_started:
+                try:
+                    self.obs.stop_recording()
+                except Exception:
+                    LOGGER.exception("failed to stop OBS recording during cleanup")
+            if capture_configured:
+                try:
+                    self.obs.restore_capture_scene()
+                except Exception:
+                    LOGGER.exception("failed to restore OBS scene during cleanup")
             if provider is not None:
+                if self.config.agent.close_apps_after_task:
+                    try:
+                        provider.shutdown_application()
+                    except Exception:
+                        LOGGER.exception("provider application shutdown failed")
                 try:
                     provider.cleanup()
                 except Exception:
                     LOGGER.exception("provider cleanup failed")
+            if self.config.agent.close_apps_after_task and obs_touched:
+                try:
+                    self.obs.shutdown_application()
+                except Exception:
+                    LOGGER.exception("OBS application shutdown failed")
 
     def _report_failure(
         self,

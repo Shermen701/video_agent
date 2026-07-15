@@ -3,6 +3,7 @@ agent:
   poll_interval_seconds: 15
   prepare_before_minutes: 5
   max_retries: 3
+  close_apps_after_task: true
 
 platform:
   base_url: "https://grcs-test.astronergy.com/"
@@ -24,6 +25,9 @@ platform:
     钉钉: "dingtalk"
     DingTalk: "dingtalk"
     dingtalk: "dingtalk"
+    觅讯: "mixlink"
+    MixLink: "mixlink"
+    mixlink: "mixlink"
   rsa_private_key_path: "config/iectp_rsa_private.pem"
   rsa_public_key_path: "config/iectp_rsa_public.pem"
   rsa_generate_if_missing: true
@@ -35,7 +39,7 @@ obs:
   websocket_host: "127.0.0.1"
   websocket_port: 4455
   websocket_password: ""
-  startup_timeout_seconds: 20
+  startup_timeout_seconds: 45
   recordings_dir: "recordings"
 
 upload:
@@ -63,5 +67,14 @@ providers:
     login_retry_count: 2
     join_retry_count: 2
     meeting_end_poll_seconds: 5
+    password_prompt_timeout_seconds: 15
+    startup_timeout_seconds: 90
     login_click_ratio: [0.5, 0.74]
     home_join_click_ratio: [0.45, 0.42]
+  mixlink:
+    executable_path: "D:\\Chint\\MixLink\\EzEasyLink.exe"
+    login_retry_count: 2
+    join_retry_count: 2
+    meeting_end_poll_seconds: 5
+    startup_timeout_seconds: 45
+    password_prompt_timeout_seconds: 15

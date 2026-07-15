@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from video_agent.app_discovery import find_dingtalk_executable, find_obs_executable, find_tencent_meeting_executable
+from video_agent.app_discovery import find_dingtalk_executable, find_mixlink_executable, find_obs_executable, find_tencent_meeting_executable
 
 
 def main() -> None:
@@ -10,6 +10,8 @@ def main() -> None:
     print(f"OBS: {obs if obs else 'not found'}")
     print(f"Tencent Meeting: {meeting if meeting else 'not found'}")
     print(f"DingTalk: {dingtalk if dingtalk else 'not found'}")
+    mixlink = find_mixlink_executable()
+    print(f"MixLink: {mixlink if mixlink else 'not found'}")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from video_agent.models import Credentials, MeetingInfo
+from video_agent.models import CaptureTarget, Credentials, MeetingInfo
 
 
 class MeetingProvider(ABC):
@@ -33,6 +33,14 @@ class MeetingProvider(ABC):
     @abstractmethod
     def wait_until_finished(self, deadline: datetime) -> None:
         """Block until the meeting ends or the fallback deadline is reached."""
+
+    def get_capture_target(self) -> CaptureTarget | None:
+        """Return the meeting window to capture, or use the existing OBS scene."""
+        return None
+
+    def shutdown_application(self) -> None:
+        """Close the provider application after a task, when configured."""
+        return None
 
     @abstractmethod
     def capture_diagnostics(self, task_dir: Path) -> Path | None:

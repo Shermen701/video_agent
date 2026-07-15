@@ -31,6 +31,14 @@ DINGTALK_CANDIDATES = [
 ]
 DINGTALK_SHORTCUT_KEYWORDS = ["钉钉", "dingtalk", "dingding"]
 
+MIXLINK_CANDIDATES = [
+    Path(r"C:\Program Files\MixLink\EzEasyLink.exe"),
+    Path(r"C:\Program Files (x86)\MixLink\EzEasyLink.exe"),
+    Path(r"D:\Chint\MixLink\EzEasyLink.exe"),
+    Path.home() / r"AppData\Local\MixLink\EzEasyLink.exe",
+]
+MIXLINK_SHORTCUT_KEYWORDS = ["觅讯", "mixlink", "ezeasylink"]
+
 
 def find_obs_executable(override: str = "") -> Path | None:
     return _find_executable(override, OBS_CANDIDATES, OBS_SHORTCUT_KEYWORDS)
@@ -42,6 +50,10 @@ def find_tencent_meeting_executable(override: str = "") -> Path | None:
 
 def find_dingtalk_executable(override: str = "") -> Path | None:
     return _find_executable(override, DINGTALK_CANDIDATES, DINGTALK_SHORTCUT_KEYWORDS)
+
+
+def find_mixlink_executable(override: str = "") -> Path | None:
+    return _find_executable(override, MIXLINK_CANDIDATES, MIXLINK_SHORTCUT_KEYWORDS)
 
 
 def _find_executable(override: str, candidates: list[Path], shortcut_keywords: list[str]) -> Path | None:

@@ -107,6 +107,15 @@ class UploadResult:
     filename: str
 
 
+@dataclass(frozen=True)
+class CaptureTarget:
+    """A native top-level window that OBS can bind to."""
+
+    title: str
+    class_name: str
+    executable_name: str
+
+
 def parse_datetime(value: Any) -> datetime:
     if isinstance(value, datetime):
         dt = value

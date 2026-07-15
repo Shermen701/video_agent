@@ -15,6 +15,9 @@ DEFAULT_PROVIDER_ALIASES = {
     "Tencent Meeting": "tencent_meeting",
     "钉钉": "dingtalk",
     "DingTalk": "dingtalk",
+    "觅讯": "mixlink",
+    "MixLink": "mixlink",
+    "mixlink": "mixlink",
     "dingtalk": "dingtalk",
 }
 
@@ -138,6 +141,7 @@ class PlatformClient:
             "maxRecordDuration": data.get("maxRecordDuration"),
             "livePlatform": live_platform,
         }
+        meeting_password = str(data.get("meetingPassword") or data.get("liveToken") or "")
         return RecordingTask(
             id=str(data["id"]),
             meeting_provider=provider,
@@ -151,7 +155,7 @@ class PlatformClient:
             ),
             meeting=MeetingInfo(
                 meeting_no=str(data.get("roomNumber") or data.get("liveUrl") or ""),
-                password=str(data.get("liveToken") or ""),
+                password=self._decrypt_credential(meeting_password),
                 extra=meeting_extra,
             ),
             raw=dict(data),

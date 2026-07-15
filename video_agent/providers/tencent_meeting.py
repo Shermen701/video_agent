@@ -252,7 +252,6 @@ class TencentMeetingProvider(MeetingProvider):
                     return control.rectangle()
         except Exception:
             return None
-        return None
 
     def _window_bounds(self) -> tuple[int, int, int, int]:
         if self.window is None:

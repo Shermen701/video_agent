@@ -119,6 +119,7 @@ class PlatformClientTest(unittest.TestCase):
         ensure_rsa_key_pair(private_key, public_key)
         encrypted_account = encrypt_rsa_credential("13117414114", public_key)
         encrypted_password = encrypt_rsa_credential("meeting-secret", public_key)
+        encrypted_meeting_password = encrypt_rsa_credential("meeting-pin", public_key)
         fake_http = FakeHttp()
         original_get = fake_http.get
 
@@ -126,6 +127,7 @@ class PlatformClientTest(unittest.TestCase):
             response = original_get(path, headers)
             response.data["data"][0]["loginAccount"] = encrypted_account
             response.data["data"][0]["loginPassword"] = encrypted_password
+            response.data["data"][0]["meetingPassword"] = encrypted_meeting_password
             return response
 
         fake_http.get = get_with_encrypted_credentials  # type: ignore[method-assign]
@@ -145,6 +147,7 @@ class PlatformClientTest(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.credentials.account, "13117414114")
         self.assertEqual(task.credentials.password, "meeting-secret")
+        self.assertEqual(task.meeting.password, "meeting-pin")
 
     def test_maps_dingtalk_task_provider_and_credentials(self) -> None:
         fake_http = FakeHttp()
@@ -178,6 +181,26 @@ class PlatformClientTest(unittest.TestCase):
         self.assertEqual(task.credentials.password, "ding-pass")
         self.assertEqual(task.meeting.meeting_no, "123456789")
         self.assertEqual(task.meeting.password, "8888")
+
+    def test_prefers_meeting_password_over_live_token(self) -> None:
+        fake_http = FakeHttp()
+        original_get = fake_http.get
+
+        def get_with_meeting_password(path: str, headers: dict[str, str] | None = None) -> HttpResponse:
+            response = original_get(path, headers)
+            response.data["data"][0]["meetingPassword"] = "meeting-password"
+            response.data["data"][0]["liveToken"] = "fallback-token"
+            return response
+
+        fake_http.get = get_with_meeting_password  # type: ignore[method-assign]
+        client = PlatformClient(PlatformConfig(api_token="token-1", rsa_generate_if_missing=False))
+        client.http = fake_http  # type: ignore[assignment]
+
+        task = client.get_next_task("recorder-001")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.meeting.password, "meeting-password")
 
     def test_maps_dingtalk_with_default_provider_aliases(self) -> None:
         fake_http = FakeHttp()
