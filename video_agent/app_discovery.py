@@ -11,6 +11,13 @@ OBS_CANDIDATES = [
 ]
 OBS_SHORTCUT_KEYWORDS = ["obs"]
 
+CHROME_CANDIDATES = [
+    Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+    Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+    Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
+]
+CHROME_SHORTCUT_KEYWORDS = ["google chrome", "chrome"]
+
 TENCENT_MEETING_CANDIDATES = [
     Path(r"C:\Program Files (x86)\Tencent\WeMeet\wemeetapp.exe"),
     Path(r"C:\Program Files\Tencent\WeMeet\wemeetapp.exe"),
@@ -42,6 +49,10 @@ MIXLINK_SHORTCUT_KEYWORDS = ["觅讯", "mixlink", "ezeasylink"]
 
 def find_obs_executable(override: str = "") -> Path | None:
     return _find_executable(override, OBS_CANDIDATES, OBS_SHORTCUT_KEYWORDS)
+
+
+def find_chrome_executable(override: str = "") -> Path | None:
+    return _find_executable(override, CHROME_CANDIDATES, CHROME_SHORTCUT_KEYWORDS)
 
 
 def find_tencent_meeting_executable(override: str = "") -> Path | None:

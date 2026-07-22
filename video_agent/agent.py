@@ -67,6 +67,7 @@ class RecordingAgent:
         recording_started = False
         capture_configured = False
         obs_touched = False
+        capture_health_screenshot: Path | None = None
         paths.task_dir.mkdir(parents=True, exist_ok=True)
         paths.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self._write_metadata(task, paths)
@@ -88,6 +89,12 @@ class RecordingAgent:
             if capture_target is not None:
                 self.obs.configure_window_capture(capture_target)
                 capture_configured = True
+            get_audio_capture_target = getattr(provider, "get_audio_capture_target", None)
+            audio_capture_target = (
+                get_audio_capture_target() if callable(get_audio_capture_target) else None
+            )
+            if audio_capture_target is not None:
+                self.obs.configure_application_audio_capture(audio_capture_target)
 
             self.obs.start_recording(paths.task_dir)
             recording_started = True
@@ -98,6 +105,17 @@ class RecordingAgent:
                 "recording started",
                 {"task": task, "record_start_time": record_start_time},
             )
+            health_check = getattr(provider, "capture_health_check_seconds", None)
+            health_check_seconds = float(health_check()) if callable(health_check) else 0.0
+            if health_check_seconds > 0:
+                capture_health_screenshot = paths.screenshots_dir / "obs-capture-black.png"
+                if not self.obs.verify_window_capture_visible(
+                    capture_health_screenshot,
+                    duration_seconds=health_check_seconds,
+                ):
+                    raise RuntimeError(
+                        "recording_failed: OBS window capture remained black"
+                    )
             recording_deadline = task.end_time
             if smoke_record_seconds is not None:
                 recording_deadline = record_start_time + timedelta(seconds=smoke_record_seconds)
@@ -140,10 +158,17 @@ class RecordingAgent:
                 task.id,
                 task.meeting_provider,
             )
-            screenshot = None
+            screenshot = (
+                capture_health_screenshot
+                if capture_health_screenshot is not None
+                and capture_health_screenshot.exists()
+                else None
+            )
             if provider is not None:
                 try:
-                    screenshot = provider.capture_diagnostics(paths.screenshots_dir)
+                    provider_diagnostic = provider.capture_diagnostics(paths.screenshots_dir)
+                    if screenshot is None:
+                        screenshot = provider_diagnostic
                 except Exception:
                     LOGGER.exception("failed to capture provider diagnostics")
             self._report_failure(task, paths, _classify_error(exc), str(exc), screenshot, record_start_time, record_end_time)

@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from video_agent.models import CaptureTarget, Credentials, utc_now
+from video_agent.models import CaptureTarget, utc_now
 from video_agent.providers.mixlink import MixLinkProvider
 from video_agent.tools.local_smoke_mixlink import _required_env
 
@@ -25,11 +25,32 @@ class FakeInfo:
         self.automation_id = automation_id
 
 
+class FakeRect:
+    def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+
+    def width(self) -> int:
+        return self.right - self.left
+
+    def height(self) -> int:
+        return self.bottom - self.top
+
+
 class FakeControl:
-    def __init__(self, automation_id: str = "", text: str = "", visible: bool = True) -> None:
+    def __init__(
+        self,
+        automation_id: str = "",
+        text: str = "",
+        visible: bool = True,
+        rect: FakeRect | None = None,
+    ) -> None:
         self.element_info = FakeInfo(automation_id)
         self.text = text
         self.visible = visible
+        self.rect = rect
         self.clicked = False
         self.invoke_count = 0
         self.input_click_count = 0
@@ -47,6 +68,22 @@ class FakeControl:
 
     def is_visible(self) -> bool:
         return self.visible
+
+    def rectangle(self) -> FakeRect:
+        if self.rect is None:
+            raise RuntimeError("rectangle is unavailable")
+        return self.rect
+
+
+class ClosingControl(FakeControl):
+    def __init__(self, *args, hides: list[FakeControl], **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.hides = hides
+
+    def click(self) -> None:
+        super().click()
+        for control in self.hides:
+            control.visible = False
 
 
 class PasswordEdit(FakeControl):
@@ -165,6 +202,51 @@ class MixLinkProviderTest(unittest.TestCase):
 
         self.assertFalse(microphone.clicked)
         self.assertFalse(camera.clicked)
+
+    def test_post_join_preparation_closes_complete_side_panel_once(self) -> None:
+        notes = FakeControl(text="会议纪要", rect=FakeRect(100, 10, 180, 38))
+        transcription = FakeControl(text="语音转写", rect=FakeRect(10, 10, 90, 38))
+        close = ClosingControl(
+            "panel.close",
+            "",
+            rect=FakeRect(190, 10, 218, 38),
+            hides=[notes, transcription],
+        )
+        leave = FakeControl(text="离开会议", rect=FakeRect(190, 10, 260, 38))
+        provider = MixLinkProvider({})
+        provider.meeting_window = FakeWindow([notes, transcription, close, leave])
+
+        with patch.object(provider, "_record_side_panel_state"):
+            provider.prepare_audio_video()
+
+        self.assertEqual(close.invoke_count, 1)
+        self.assertFalse(leave.clicked)
+
+    def test_side_panel_close_requires_header_aligned_safe_control(self) -> None:
+        notes = FakeControl(text="会议纪要", rect=FakeRect(100, 10, 180, 38))
+        far_close = FakeControl("panel.close", rect=FakeRect(600, 10, 628, 38))
+        leave = FakeControl(text="离开会议", rect=FakeRect(190, 10, 260, 38))
+        provider = MixLinkProvider({})
+        window = FakeWindow([notes, far_close, leave])
+
+        with patch.object(provider, "_record_side_panel_state"):
+            self.assertFalse(provider._collapse_side_panels(window))
+
+        self.assertFalse(far_close.clicked)
+        self.assertFalse(leave.clicked)
+
+    def test_side_panel_close_can_run_again_after_the_panel_reopens(self) -> None:
+        notes = FakeControl(text="会议纪要", rect=FakeRect(100, 10, 180, 38))
+        close = ClosingControl("panel.close", rect=FakeRect(190, 10, 218, 38), hides=[notes])
+        provider = MixLinkProvider({})
+        window = FakeWindow([notes, close])
+
+        with patch.object(provider, "_record_side_panel_state"):
+            self.assertTrue(provider._collapse_side_panels(window))
+            notes.visible = True
+            self.assertTrue(provider._collapse_side_panels(window))
+
+        self.assertEqual(close.invoke_count, 2)
 
     def test_finds_meeting_password_prompt_but_not_login_window(self) -> None:
         password_prompt = PromptWindow([PasswordEdit()])

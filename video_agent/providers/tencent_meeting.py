@@ -9,16 +9,20 @@ from typing import Any
 
 from video_agent.app_discovery import find_tencent_meeting_executable
 from video_agent.models import Credentials, MeetingInfo
+from video_agent.process_control import shutdown_matching_processes
 from video_agent.providers.base import MeetingProvider
 
 
 class TencentMeetingProvider(MeetingProvider):
     provider_name = "tencent_meeting"
+    LOGIN_GUIDE_PAGE = "QApplication.wemeet://page/guide"
+    IN_MEETING_PAGE = "QApplication.wemeet://page/inmeeting"
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.app = None
         self.window = None
+        self.meeting_window = None
         self.window_title_regex = str(config.get("window_title_regex") or "腾讯会议|Tencent Meeting")
 
     def launch(self) -> None:
@@ -35,22 +39,22 @@ class TencentMeetingProvider(MeetingProvider):
 
     def ensure_logged_in(self, credentials: Credentials) -> None:
         self._ensure_pywinauto()
-        if self.config.get("assume_logged_in") and not self._is_login_page():
-            return
         # If the main window is already present and no obvious login entry exists, treat it as logged in.
         login_retry_count = int(self.config.get("login_retry_count") or 2)
         for _ in range(login_retry_count):
             self._connect_window(timeout_seconds=5)
             if self._is_login_page():
-                self._dismiss_agreement_prompt_if_present()
-                self._accept_agreement_if_present()
-                self._click_phone_login_if_present()
-                time.sleep(1)
-                self._dismiss_agreement_prompt_if_present()
+                if len(self._edit_controls()) < 2:
+                    self._wait_for_login_guide_ready()
+                    self._click_phone_login_if_present()
+                    self._wait_for_phone_login_form()
+                self._select_password_login()
+                self._wait_for_login_edits()
                 self._fill_login_credentials(credentials)
-                self._accept_agreement_if_present()
+                time.sleep(float(self.config.get("login_input_settle_seconds") or 1.0))
                 self._click_login()
-                time.sleep(3)
+                if self._wait_until_login_complete():
+                    return
                 continue
             return
         if self._is_login_page():
@@ -63,24 +67,24 @@ class TencentMeetingProvider(MeetingProvider):
             self._connect_window(timeout_seconds=5)
             if not self._click_if_present(["加入会议", "Join"]):
                 self._click_home_join_fallback()
-            time.sleep(1)
+            if not self._connect_join_window(timeout_seconds=5):
+                if self._connect_in_meeting_window(timeout_seconds=1):
+                    return
+                continue
             if self._is_login_page():
                 raise RuntimeError("Tencent Meeting is still on login page")
             if self._has_text(["为保障您的合法权益"]):
                 raise RuntimeError("Tencent Meeting agreement dialog is blocking login")
-            if not self._edit_controls() and self.config.get("assume_joined_when_join_form_missing"):
-                return
             self._fill_first_edit(meeting.meeting_no)
-            if meeting.password:
-                self._fill_next_edit(meeting.password)
             self._click_first(["加入会议", "入会", "Join"])
-            time.sleep(5)
-            if not self._has_text(["加入会议"]):
+            if self._wait_for_meeting_after_submit(meeting):
                 return
         raise RuntimeError("Tencent Meeting join failed")
 
     def prepare_audio_video(self) -> None:
         self._ensure_pywinauto()
+        self._connect_in_meeting_window(timeout_seconds=5)
+        self._select_computer_audio_if_present()
         self._click_if_present(["静音", "解除静音", "麦克风"])
         self._click_if_present(["关闭视频", "开启视频", "摄像头"])
 
@@ -106,11 +110,105 @@ class TencentMeetingProvider(MeetingProvider):
         return path
 
     def cleanup(self) -> None:
+        self.meeting_window = None
         self.window = None
+
+    def shutdown_application(self) -> None:
+        self._logout_current_account()
+        executable = find_tencent_meeting_executable(
+            str(self.config.get("executable_path") or "")
+        )
+        if executable is None:
+            return
+        shutdown_matching_processes(
+            executable_names={"WeMeetApp.exe"},
+            allowed_roots={executable.parent},
+            timeout_seconds=float(self.config.get("shutdown_timeout_seconds") or 5),
+        )
+
+    def _logout_current_account(self) -> None:
+        try:
+            self._connect_window(timeout_seconds=3)
+        except RuntimeError:
+            return
+        if self._is_login_page():
+            return
+
+        from pywinauto import Desktop, mouse  # type: ignore
+
+        settings_ratio = self.config.get("home_settings_click_ratio") or [0.063, 0.831]
+        left, top, width, height = self._window_bounds()
+        mouse.click(
+            coords=(
+                int(left + width * float(settings_ratio[0])),
+                int(top + height * float(settings_ratio[1])),
+            )
+        )
+
+        deadline = time.monotonic() + 5
+        settings = None
+        while time.monotonic() < deadline:
+            for window in Desktop(backend="uia").windows():
+                if str(window.element_info.automation_id or "") == "QApplication.SettingPanelDialog":
+                    settings = window
+                    break
+            if settings is not None:
+                break
+            time.sleep(0.2)
+        if settings is None:
+            raise RuntimeError("Tencent Meeting settings window did not open")
+
+        account_security = next(
+            (
+                control
+                for control in settings.descendants()
+                if str(control.window_text() or "") == "账号安全与隐私"
+            ),
+            None,
+        )
+        if account_security is None:
+            raise RuntimeError("Tencent Meeting account security settings not found")
+        account_security.click_input()
+        time.sleep(0.5)
+
+        rect = settings.rectangle()
+        scroll_point = (
+            int(rect.left + rect.width() * 0.75),
+            int(rect.top + rect.height() * 0.75),
+        )
+        mouse.move(coords=scroll_point)
+        mouse.scroll(coords=scroll_point, wheel_dist=-20)
+        time.sleep(0.5)
+        logout_ratio = self.config.get("logout_click_ratio") or [0.92, 0.883]
+        mouse.click(
+            coords=(
+                int(rect.left + rect.width() * float(logout_ratio[0])),
+                int(rect.top + rect.height() * float(logout_ratio[1])),
+            )
+        )
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                self._connect_window(timeout_seconds=1)
+            except RuntimeError:
+                continue
+            if self._is_login_page():
+                return
+        raise RuntimeError("Tencent Meeting logout did not return to the login page")
 
     def _meeting_has_finished(self) -> bool:
         if self.config.get("disable_meeting_end_text_detection"):
             return False
+        if self.meeting_window is not None:
+            try:
+                handle = int(self.meeting_window.handle)
+            except Exception:
+                handle = 0
+            if handle and not self._window_exists(handle):
+                return True
+            if handle:
+                return self._window_has_end_text(self.meeting_window)
         try:
             self._connect_window(timeout_seconds=1)
         except Exception:
@@ -128,9 +226,11 @@ class TencentMeetingProvider(MeetingProvider):
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                handle = self._find_window_handle(pattern)
-                if handle:
-                    self.window = Desktop(backend="uia").window(handle=handle)
+                for handle in self._find_window_handles(pattern):
+                    window = Desktop(backend="uia").window(handle=handle)
+                    if self._is_transient_window(window):
+                        continue
+                    self.window = window
                     try:
                         self.app = Application(backend="uia").connect(handle=handle)
                     except Exception:
@@ -141,6 +241,128 @@ class TencentMeetingProvider(MeetingProvider):
                 last_error = exc
             time.sleep(1)
         raise RuntimeError("Tencent Meeting window not found") from last_error
+
+    def _connect_in_meeting_window(self, timeout_seconds: int) -> bool:
+        from pywinauto import Application, Desktop  # type: ignore
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            for window in Desktop(backend="uia").windows():
+                if not self._is_in_meeting_window(window):
+                    continue
+                self.window = window
+                self.meeting_window = window
+                try:
+                    self.app = Application(backend="uia").connect(handle=window.handle)
+                except Exception:
+                    self.app = None
+                self._bring_window_to_front()
+                return True
+            time.sleep(0.2)
+        return False
+
+    @staticmethod
+    def _window_exists(handle: int) -> bool:
+        try:
+            import win32gui  # type: ignore
+
+            return bool(win32gui.IsWindow(handle))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _window_has_end_text(window: Any) -> bool:
+        try:
+            texts = [str(control.window_text() or "") for control in window.descendants()]
+        except Exception:
+            return False
+        return any(
+            marker in text
+            for text in texts
+            for marker in ("会议已结束", "会议已被结束", "会议已关闭")
+        )
+
+    def _connect_join_window(self, timeout_seconds: int) -> bool:
+        from pywinauto import Application, Desktop  # type: ignore
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            for window in Desktop(backend="uia").windows():
+                if str(window.window_text() or "") not in {"加入会议", "Join Meeting"}:
+                    continue
+                self.window = window
+                try:
+                    self.app = Application(backend="uia").connect(handle=window.handle)
+                except Exception:
+                    self.app = None
+                self._bring_window_to_front()
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _wait_for_meeting_after_submit(self, meeting: MeetingInfo) -> bool:
+        timeout_seconds = float(self.config.get("password_prompt_timeout_seconds") or 15)
+        deadline = time.monotonic() + timeout_seconds
+        password_submitted = False
+        while time.monotonic() < deadline:
+            if self._connect_in_meeting_window(timeout_seconds=0.5):
+                return True
+            if not self._connect_join_window(timeout_seconds=0.5):
+                continue
+            if self._has_text(["密码错误", "密码不正确", "会议密码错误"]):
+                raise RuntimeError("Tencent Meeting password was rejected")
+            password_edit = self._meeting_password_edit()
+            if password_edit is not None and not password_submitted:
+                if not meeting.password:
+                    raise RuntimeError("Tencent Meeting requires a meeting password")
+                self._set_login_edit_text(password_edit, meeting.password)
+                self._click_first(["加入", "Join"])
+                password_submitted = True
+            time.sleep(0.2)
+        return False
+
+    def _meeting_password_edit(self) -> Any | None:
+        for edit in self._edit_controls():
+            try:
+                automation_id = str(edit.element_info.automation_id or "")
+            except Exception:
+                continue
+            if ".PwdEdit." in automation_id:
+                return edit
+        return None
+
+    def _select_computer_audio_if_present(self) -> None:
+        timeout_seconds = float(self.config.get("computer_audio_prompt_timeout_seconds") or 3)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self._invoke_exact_button_if_present("使用电脑音频"):
+                time.sleep(0.5)
+                return
+            time.sleep(0.2)
+
+    def _invoke_exact_button_if_present(self, title: str) -> bool:
+        if self.window is None:
+            return False
+        try:
+            controls = self.window.descendants()
+        except Exception:
+            return False
+        for control in controls:
+            if str(control.window_text() or "") != title:
+                continue
+            if str(control.element_info.control_type or "") != "Button":
+                continue
+            try:
+                if not control.is_visible() or not control.is_enabled():
+                    continue
+                control.invoke()
+            except Exception:
+                try:
+                    control.click_input()
+                except Exception:
+                    return False
+            return True
+        return False
 
     def _has_text(self, texts: list[str]) -> bool:
         if self.window is None:
@@ -166,35 +388,107 @@ class TencentMeetingProvider(MeetingProvider):
         return values
 
     def _is_login_page(self) -> bool:
-        return self._has_text(["我已阅读并同意", "手机号", "邮箱", "SSO", "企业微信", "微信登录"])
+        return self._page_automation_id().startswith(self.LOGIN_GUIDE_PAGE) or self._has_text(
+            ["我已阅读并同意", "手机号", "邮箱", "SSO", "企业微信", "微信登录"]
+        )
+
+    def _wait_for_login_guide_ready(self) -> None:
+        timeout_seconds = float(self.config.get("login_form_timeout_seconds") or 15)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if self._has_text(["我已阅读并同意"]):
+                return
+            time.sleep(0.2)
+        raise RuntimeError("Tencent Meeting login guide did not finish loading")
 
     def _click_phone_login_if_present(self) -> None:
         if self._click_if_present(["手机号"]):
             return
         self._click_ratio(self.config.get("phone_login_click_ratio") or [0.17, 0.76])
 
-    def _accept_agreement_if_present(self) -> None:
-        if not self._has_text(["我已阅读并同意"]):
-            return
-        if self._click_if_present(["我已阅读并同意"]):
-            return
-        rect = self._text_rectangle("我已阅读并同意")
-        if rect is not None:
-            self._click_absolute(rect.left - 18, rect.top + rect.height() // 2)
-            return
-        self._click_ratio(self.config.get("agreement_click_ratio") or [0.17, 0.92])
+    def _wait_for_phone_login_form(self) -> None:
+        timeout_seconds = float(self.config.get("login_form_timeout_seconds") or 15)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                self._connect_window(timeout_seconds=1)
+            except RuntimeError:
+                time.sleep(0.2)
+                continue
+            if self._has_text(["为保障您的合法权益"]):
+                self._dismiss_agreement_prompt_if_present()
+                self._click_phone_login_if_present()
+                time.sleep(0.2)
+                continue
+            if len(self._edit_controls()) >= 2 or self._has_text(
+                ["密码登录", "验证码登录", "手机密码登录", "手机验证码登录"]
+            ):
+                return
+            time.sleep(0.2)
+        raise RuntimeError("Tencent Meeting phone login form did not appear")
 
-    def _dismiss_agreement_prompt_if_present(self) -> None:
-        if self._click_if_present(["同意"]):
+    def _select_password_login(self) -> None:
+        edits = self._edit_controls()
+        if len(edits) >= 3 and str(edits[0].window_text() or "").strip() in {"86", "+86"}:
+            return
+        if self._has_text(["请输入密码", "忘记密码", "手机密码登录"]):
+            return
+        if self._click_if_present(["密码登录", "手机密码登录"]):
             time.sleep(0.5)
             return
+        rect = self._text_rectangle("密码登录")
+        if rect is not None:
+            self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+            time.sleep(0.5)
+            return
+        raise RuntimeError("Tencent Meeting password login entry not found")
+
+    def _wait_for_login_edits(self) -> None:
+        timeout_seconds = float(self.config.get("login_form_timeout_seconds") or 15)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if len(self._edit_controls()) >= 2:
+                return
+            time.sleep(0.2)
+        raise RuntimeError("Tencent Meeting login input controls not found")
+
+    def _wait_until_login_complete(self) -> bool:
+        timeout_seconds = float(self.config.get("login_result_timeout_seconds") or 12)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                self._connect_window(timeout_seconds=1)
+            except RuntimeError:
+                continue
+            if self._has_text(["密码错误", "登录失败", "账号不可使用", "请求超时"]):
+                raise RuntimeError("Tencent Meeting login was rejected")
+            if not self._is_login_page() and len(self._edit_controls()) < 2:
+                return True
+        return False
+
+    def _page_automation_id(self) -> str:
+        if self.window is None:
+            return ""
+        try:
+            return str(self.window.element_info.automation_id or "")
+        except Exception:
+            return ""
+
+    def _dismiss_agreement_prompt_if_present(self) -> None:
         rect = self._text_rectangle("为保障您的合法权益")
         if rect is None:
             return
-        self._click_absolute(rect.left + rect.width() - 35, rect.bottom + 55)
+        if self._invoke_exact_button_if_present("同意"):
+            time.sleep(0.5)
+            return
+        self._click_ratio(self.config.get("agreement_prompt_accept_click_ratio") or [0.73, 0.55])
         time.sleep(0.5)
 
     def _click_first(self, names: list[str]) -> None:
+        for name in names:
+            if self._invoke_exact_button_if_present(name):
+                return
         if not self._click_if_present(names):
             raise RuntimeError(f"control not found: {names}")
 
@@ -219,7 +513,7 @@ class TencentMeetingProvider(MeetingProvider):
             raise RuntimeError("Tencent Meeting window is not connected")
 
         self._bring_window_to_front()
-        ratio = self.config.get("home_join_click_ratio") or [0.354, 0.341]
+        ratio = self.config.get("home_join_click_ratio") or [0.21, 0.34]
         if not isinstance(ratio, list | tuple) or len(ratio) != 2:
             raise RuntimeError("home_join_click_ratio must be a two-item list")
         left, top, width, height = self._window_bounds()
@@ -286,10 +580,9 @@ class TencentMeetingProvider(MeetingProvider):
         user32.mouse_event(0x0004, 0, 0, 0, 0)
 
     @staticmethod
-    def _find_window_handle(pattern: re.Pattern[str]) -> int | None:
+    def _find_window_handles(pattern: re.Pattern[str]) -> list[int]:
         try:
             import win32gui  # type: ignore
-            import win32process  # type: ignore
 
             handles: list[int] = []
 
@@ -297,22 +590,38 @@ class TencentMeetingProvider(MeetingProvider):
                 if not win32gui.IsWindowVisible(hwnd):
                     return True
                 title = win32gui.GetWindowText(hwnd)
-                try:
-                    _thread_id, pid = win32process.GetWindowThreadProcessId(hwnd)
-                except Exception:
-                    pid = 0
                 if pattern.search(title or ""):
                     handles.append(hwnd)
-                    return False
+                    return True
                 if title == "腾讯会议":
                     handles.append(hwnd)
-                    return False
                 return True
 
             win32gui.EnumWindows(callback, None)
-            return handles[0] if handles else None
+            return handles
         except Exception:
-            return None
+            return []
+
+    @classmethod
+    def _find_window_handle(cls, pattern: re.Pattern[str]) -> int | None:
+        handles = cls._find_window_handles(pattern)
+        return handles[0] if handles else None
+
+    @staticmethod
+    def _is_transient_window(window: Any) -> bool:
+        try:
+            automation_id = str(window.element_info.automation_id or "").lower()
+        except Exception:
+            return False
+        return "/page/nxui/toast" in automation_id or "/page/nxui/alert" in automation_id
+
+    @classmethod
+    def _is_in_meeting_window(cls, window: Any) -> bool:
+        try:
+            automation_id = str(window.element_info.automation_id or "")
+        except Exception:
+            return False
+        return automation_id.startswith(cls.IN_MEETING_PAGE)
 
     def _bring_window_to_front(self) -> None:
         if self.window is None:
@@ -346,14 +655,21 @@ class TencentMeetingProvider(MeetingProvider):
     def _fill_login_credentials(self, credentials: Credentials) -> None:
         edits = self._edit_controls()
         if len(edits) >= 3:
-            self._set_edit_text(edits[1], credentials.account)
-            self._set_edit_text(edits[2], credentials.password)
+            self._set_login_edit_text(edits[1], credentials.account)
+            self._set_login_edit_text(edits[2], credentials.password)
             return
         if len(edits) >= 2:
-            self._set_edit_text(edits[0], credentials.account)
-            self._set_edit_text(edits[1], credentials.password)
+            self._set_login_edit_text(edits[0], credentials.account)
+            self._set_login_edit_text(edits[1], credentials.password)
             return
         raise RuntimeError("login input controls not found")
+
+    @staticmethod
+    def _set_login_edit_text(edit: Any, text: str) -> None:
+        edit.click_input()
+        edit.type_keys("^a{BACKSPACE}", set_foreground=False)
+        edit.type_keys(text, with_spaces=True, set_foreground=False, pause=0.03)
+        time.sleep(0.2)
 
     @staticmethod
     def _set_edit_text(edit: Any, text: str) -> None:

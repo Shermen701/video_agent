@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+from io import BytesIO
 import subprocess
 import socket
 import time
@@ -16,6 +18,8 @@ from video_agent.process_control import (
 
 CAPTURE_SCENE_NAME = "VideoAgent-DingTalk"
 CAPTURE_INPUT_NAME = "VideoAgent-DingTalk-Window"
+CAPTURE_AUDIO_INPUT_NAME = "VideoAgent-Application-Audio"
+APPLICATION_AUDIO_CAPTURE_KIND = "wasapi_process_output_capture"
 
 
 class ObsController:
@@ -148,6 +152,10 @@ class ObsController:
                 "boundsType": "OBS_BOUNDS_SCALE_INNER",
                 "boundsWidth": width,
                 "boundsHeight": height,
+                "cropLeft": 0,
+                "cropTop": 0,
+                "cropRight": 0,
+                "cropBottom": 0,
                 "positionX": 0.0,
                 "positionY": 0.0,
             },
@@ -161,6 +169,75 @@ class ObsController:
         previous_scene = self._previous_scene
         self._client.set_current_program_scene(previous_scene)
         self._previous_scene = None
+
+    def configure_application_audio_capture(self, target: CaptureTarget) -> None:
+        """Capture audio from one application instead of all desktop output."""
+        self._require_client()
+        if not target.title or not target.class_name or not target.executable_name:
+            raise RuntimeError("recording_failed: incomplete application audio capture target")
+        settings = {
+            "window": f"{target.title}:{target.class_name}:{target.executable_name}",
+            "priority": 1,
+        }
+        inputs = self._client.get_input_list().inputs  # type: ignore[union-attr]
+        input_names = {
+            str(item.get("inputName", "")) if isinstance(item, dict) else str(getattr(item, "input_name", ""))
+            for item in inputs
+        }
+        if CAPTURE_AUDIO_INPUT_NAME in input_names:
+            self._client.set_input_settings(CAPTURE_AUDIO_INPUT_NAME, settings, True)  # type: ignore[union-attr]
+            try:
+                self._client.get_scene_item_id(CAPTURE_SCENE_NAME, CAPTURE_AUDIO_INPUT_NAME)  # type: ignore[union-attr]
+            except Exception:
+                self._client.create_scene_item(CAPTURE_SCENE_NAME, CAPTURE_AUDIO_INPUT_NAME, True)  # type: ignore[union-attr]
+            return
+        self._client.create_input(  # type: ignore[union-attr]
+            CAPTURE_SCENE_NAME,
+            CAPTURE_AUDIO_INPUT_NAME,
+            APPLICATION_AUDIO_CAPTURE_KIND,
+            settings,
+            True,
+        )
+
+    def verify_window_capture_visible(
+        self,
+        diagnostic_path: Path,
+        duration_seconds: float = 5.0,
+        sample_count: int = 3,
+    ) -> bool:
+        """Return false only when every sampled OBS source frame is pure black."""
+        self._require_client()
+        try:
+            from PIL import Image  # type: ignore
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Pillow is required for OBS capture health checks") from exc
+
+        samples = max(1, int(sample_count))
+        interval = max(0.0, float(duration_seconds)) / samples
+        black_images = []
+        for _ in range(samples):
+            if interval:
+                time.sleep(interval)
+            response = self._client.get_source_screenshot(  # type: ignore[union-attr]
+                CAPTURE_INPUT_NAME,
+                "png",
+                320,
+                180,
+                -1,
+            )
+            image_data = str(getattr(response, "image_data", "") or "")
+            encoded = image_data.split(",", 1)[-1]
+            try:
+                image = Image.open(BytesIO(base64.b64decode(encoded))).convert("L")
+            except Exception as exc:
+                raise RuntimeError("recording_failed: invalid OBS capture screenshot") from exc
+            if image.getextrema()[1] > 4:
+                return True
+            black_images.append(image.copy())
+
+        diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+        black_images[-1].save(diagnostic_path, format="PNG")
+        return False
 
     def shutdown_application(self) -> None:
         """Stop OBS safely and close the path-verified OBS process."""

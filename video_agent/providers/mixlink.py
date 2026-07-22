@@ -28,6 +28,7 @@ class MixLinkProvider(MeetingProvider):
         self.meeting_window = None
         self._startup_observations: list[str] = []
         self._join_observations: list[str] = []
+        self._side_panel_observations: set[str] = set()
         self._last_process_snapshot = ""
 
     def launch(self) -> None:
@@ -134,6 +135,7 @@ class MixLinkProvider(MeetingProvider):
         # Text such as “开启麦克风” already means it is off and must be left alone.
         self._click_exact_named(self.meeting_window, ["关闭麦克风", "静音"])
         self._click_exact_named(self.meeting_window, ["关闭摄像头", "关闭视频", "停止视频"])
+        self._collapse_side_panels(self.meeting_window)
 
     def get_capture_target(self) -> CaptureTarget | None:
         handle = self._window_handle(self.meeting_window)
@@ -163,6 +165,10 @@ class MixLinkProvider(MeetingProvider):
                 self.meeting_window = current
                 if self._meeting_has_ended_text(current):
                     return
+                # Meeting notes/transcription can reopen after the client
+                # receives an update.  Only repeat the same narrowly scoped,
+                # verified close action; never use a generic window-level X.
+                self._collapse_side_panels(current)
                 missing_count = 0
             else:
                 # A destroyed native meeting window is a definitive end signal.
@@ -207,6 +213,7 @@ class MixLinkProvider(MeetingProvider):
         self.main_window = None
         self.window = None
         self.meeting_window = None
+        self._side_panel_observations.clear()
 
     def _connect_main_window(self, timeout_seconds: float, required: bool = True) -> bool:
         deadline = time.monotonic() + timeout_seconds
@@ -433,6 +440,115 @@ class MixLinkProvider(MeetingProvider):
                     candidates.append((1, window))
         return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
+    def _collapse_side_panels(self, window: Any) -> bool:
+        """Close the optional notes/transcription area without touching meeting actions.
+
+        MixLink exposes the right-hand area differently across builds: one close
+        button can hide the complete area, or each visible page can have its own
+        close button.  Locate a close control only when it is on the same header
+        row and to the right of a known panel title.  This deliberately excludes
+        the meeting window's own close button and the leave/end controls.
+        """
+        changed = False
+        for _attempt in range(2):
+            titles = self._visible_side_panel_titles(window)
+            if not titles:
+                return changed
+            closed = False
+            for title in titles:
+                control = self._find_side_panel_close_control(window, title)
+                if control is None:
+                    self._record_side_panel_state(f"side_panel_close_unavailable:{title}")
+                    continue
+                try:
+                    self._activate_control(control)
+                    self._record_side_panel_state(f"side_panel_close_clicked:{title}")
+                    changed = True
+                    closed = True
+                    time.sleep(0.2)
+                    break
+                except Exception:
+                    self._record_side_panel_state(f"side_panel_close_failed:{title}")
+            if not closed:
+                return changed
+        return changed
+
+    @staticmethod
+    def _visible_side_panel_titles(window: Any) -> list[tuple[str, Any]]:
+        found: list[tuple[str, Any]] = []
+        for control in MixLinkProvider._visible_controls(window):
+            text = str(control.window_text() or "").strip()
+            if text in {"语音转写", "会议纪要"}:
+                found.append((text, control))
+        return found
+
+    @staticmethod
+    def _find_side_panel_close_control(window: Any, title: tuple[str, Any]) -> Any | None:
+        _title_text, title_control = title
+        title_rect = MixLinkProvider._control_rectangle(title_control)
+        if title_rect is None:
+            return None
+        for control in MixLinkProvider._visible_controls(window):
+            if control is title_control or not MixLinkProvider._is_safe_close_control(control):
+                continue
+            rect = MixLinkProvider._control_rectangle(control)
+            if rect is None:
+                continue
+            # The panel close button is a compact icon on the title's header,
+            # immediately to its right.  The limits also rule out the main
+            # window close button and actions in the bottom meeting toolbar.
+            if (
+                rect.left < title_rect.right
+                or rect.left - title_rect.right > 360
+                or rect.width() > 80
+                or rect.height() > 80
+                or rect.bottom < title_rect.top - 24
+                or rect.top > title_rect.bottom + 24
+            ):
+                continue
+            return control
+        return None
+
+    @staticmethod
+    def _is_safe_close_control(control: Any) -> bool:
+        try:
+            text = str(control.window_text() or "").strip()
+            auto_id = str(control.element_info.automation_id or "").casefold()
+            if any(value in text for value in ("离开会议", "结束会议", "退出会议")):
+                return False
+            return text in {"", "×", "✕", "关闭"} or "close" in auto_id
+        except Exception:
+            return False
+
+    @staticmethod
+    def _visible_controls(window: Any) -> list[Any]:
+        controls = []
+        try:
+            controls = list(window.descendants())
+        except Exception:
+            return []
+        visible = []
+        for control in controls:
+            try:
+                if control.is_visible():
+                    visible.append(control)
+            except Exception:
+                # Some Qt UIA elements do not expose IsOffscreen.  Retain
+                # them only when they can still be bounded safely below.
+                if MixLinkProvider._control_rectangle(control) is not None:
+                    visible.append(control)
+        return visible
+
+    @staticmethod
+    def _control_rectangle(control: Any) -> Any | None:
+        try:
+            rect = control.rectangle()
+            if rect.width() <= 0 or rect.height() <= 0:
+                return None
+            return rect
+        except Exception:
+            return None
+
     def _process_windows(self, visible_only: bool) -> list[Any]:
         names = {name.casefold() for name in self.PROCESS_NAMES}
         results = []
@@ -518,6 +634,13 @@ class MixLinkProvider(MeetingProvider):
         except Exception as exc:
             windows = [f"window_query_unavailable={exc}"]
         self._join_observations.append(f"join {phase}: windows={windows}")
+
+    def _record_side_panel_state(self, phase: str) -> None:
+        """Keep one concise observation per side-panel outcome per task."""
+        if phase in self._side_panel_observations:
+            return
+        self._side_panel_observations.add(phase)
+        self._record_join_state(phase)
 
     def _wait_for_window_class(self, class_name: str, timeout_seconds: float) -> Any | None:
         deadline = time.monotonic() + timeout_seconds

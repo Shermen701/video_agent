@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from video_agent.agent import RecordingAgent
 from video_agent.config import AgentConfig, AppConfig, ObsConfig, UploadConfig
@@ -21,19 +21,11 @@ class FakePlatform:
     def report_status(self, task_id: str, status: TaskStatus, message: str = "", extra=None, failure=None) -> None:
         self.statuses.append(status)
 
-    def init_upload(self, task_id: str, file_path: Path, part_size: int) -> str:
-        return "upload-1"
-
-    def upload_part(self, upload_id: str, part_no: int, data: bytes) -> None:
-        return None
-
-    def complete_upload(self, upload_id: str, task_id: str) -> None:
-        return None
-
 
 class FakeObs:
     def __init__(self) -> None:
         self.events: list[str] = []
+        self.capture_visible = True
 
     def ensure_running(self) -> None:
         return None
@@ -53,8 +45,18 @@ class FakeObs:
     def configure_window_capture(self, target: CaptureTarget) -> None:
         self.events.append("configure")
 
+    def configure_application_audio_capture(self, target: CaptureTarget) -> None:
+        self.events.append("audio_configure")
+
     def restore_capture_scene(self) -> None:
         self.events.append("restore")
+
+    def verify_window_capture_visible(self, diagnostic_path: Path, duration_seconds: float) -> bool:
+        self.events.append("health")
+        if not self.capture_visible:
+            diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+            diagnostic_path.write_bytes(b"black")
+        return self.capture_visible
 
     def shutdown_application(self) -> None:
         self.events.append("shutdown")
@@ -162,6 +164,16 @@ class WindowProvider(FakeProvider):
         super().wait_until_finished(deadline)
 
 
+class AudioWindowProvider(WindowProvider):
+    def get_audio_capture_target(self) -> CaptureTarget | None:
+        return CaptureTarget("Douyin", "Chrome_WidgetWin_1", "chrome.exe")
+
+
+class HealthCheckedWindowProvider(WindowProvider):
+    def capture_health_check_seconds(self) -> float:
+        return 5.0
+
+
 class AgentFlowTest(unittest.TestCase):
     def test_executes_successful_task(self) -> None:
         now = utc_now()
@@ -244,6 +256,29 @@ class AgentFlowTest(unittest.TestCase):
 
         self.assertEqual(obs.events, ["configure", "start", "stop", "restore", "shutdown"])
 
+    def test_application_audio_capture_is_configured_before_recording(self) -> None:
+        now = utc_now()
+        task = RecordingTask(
+            id="task-browser-audio",
+            start_time=now,
+            end_time=now + timedelta(minutes=10),
+            credentials=Credentials("", ""),
+            meeting=MeetingInfo("https://live.douyin.com/123"),
+            meeting_provider="douyin_live",
+        )
+        workspace_tmp = Path("test_outputs") / "agent_flow"
+        config = AppConfig(
+            agent=AgentConfig(prepare_before_minutes=5),
+            obs=ObsConfig(recordings_dir=str(workspace_tmp)),
+        )
+        obs = FakeObs()
+        agent = RecordingAgent(config, platform=FakePlatform(task), obs=obs, uploader=FakeUploader())  # type: ignore[arg-type]
+
+        with patch("video_agent.agent.create_provider", return_value=AudioWindowProvider()):
+            agent.run_once()
+
+        self.assertEqual(obs.events[:3], ["configure", "audio_configure", "start"])
+
     def test_recording_and_scene_are_cleaned_up_when_provider_wait_fails(self) -> None:
         now = utc_now()
         task = RecordingTask(
@@ -267,6 +302,39 @@ class AgentFlowTest(unittest.TestCase):
 
         self.assertEqual(obs.events, ["configure", "start", "stop", "restore", "shutdown"])
         self.assertEqual(platform.statuses[-1], TaskStatus.FAILED)
+
+    def test_black_capture_fails_before_upload_and_cleans_up(self) -> None:
+        now = utc_now()
+        task = RecordingTask(
+            id="task-black-capture",
+            start_time=now,
+            end_time=now + timedelta(minutes=10),
+            credentials=Credentials("", ""),
+            meeting=MeetingInfo("https://live.douyin.com/123"),
+            meeting_provider="douyin_live",
+        )
+        config = AppConfig(
+            agent=AgentConfig(prepare_before_minutes=5),
+            obs=ObsConfig(recordings_dir="test_outputs/agent_flow"),
+        )
+        obs = FakeObs()
+        obs.capture_visible = False
+        platform = FakePlatform(task)
+        uploader = MagicMock()
+        agent = RecordingAgent(config, platform=platform, obs=obs, uploader=uploader)
+
+        with patch(
+            "video_agent.agent.create_provider",
+            return_value=HealthCheckedWindowProvider(),
+        ):
+            agent.run_once()
+
+        uploader.upload.assert_not_called()
+        self.assertEqual(platform.statuses[-1], TaskStatus.FAILED)
+        self.assertEqual(
+            obs.events,
+            ["configure", "start", "health", "stop", "restore", "shutdown"],
+        )
 
     def test_close_apps_can_be_disabled(self) -> None:
         now = utc_now()

@@ -38,6 +38,14 @@ class MeetingProvider(ABC):
         """Return the meeting window to capture, or use the existing OBS scene."""
         return None
 
+    def get_audio_capture_target(self) -> CaptureTarget | None:
+        """Return one application whose audio should be captured by OBS."""
+        return None
+
+    def capture_health_check_seconds(self) -> float:
+        """Return an OBS black-frame check duration, or zero to disable it."""
+        return 0.0
+
     def shutdown_application(self) -> None:
         """Close the provider application after a task, when configured."""
         return None

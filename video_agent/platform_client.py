@@ -11,6 +11,10 @@ from video_agent.rsa_crypto import decrypt_rsa_credential, ensure_rsa_key_pair, 
 
 
 DEFAULT_PROVIDER_ALIASES = {
+    "抖音": "douyin_live",
+    "抖音直播": "douyin_live",
+    "Douyin": "douyin_live",
+    "Douyin Live": "douyin_live",
     "腾讯会议": "tencent_meeting",
     "Tencent Meeting": "tencent_meeting",
     "钉钉": "dingtalk",

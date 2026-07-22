@@ -6,7 +6,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from video_agent.config import AppConfig, ObsConfig, PlatformConfig
+from video_agent.config import AppConfig
 from video_agent.rsa_crypto import ensure_rsa_key_pair
 
 APP_DIR_NAME = "VideoAgent"

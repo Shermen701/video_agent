@@ -28,6 +28,10 @@ platform:
     觅讯: "mixlink"
     MixLink: "mixlink"
     mixlink: "mixlink"
+    抖音: "douyin_live"
+    抖音直播: "douyin_live"
+    Douyin: "douyin_live"
+    Douyin Live: "douyin_live"
   rsa_private_key_path: "config/iectp_rsa_private.pem"
   rsa_public_key_path: "config/iectp_rsa_public.pem"
   rsa_generate_if_missing: true
@@ -78,3 +82,12 @@ providers:
     meeting_end_poll_seconds: 5
     startup_timeout_seconds: 45
     password_prompt_timeout_seconds: 15
+  douyin_live:
+    executable_path: ""
+    # A separate browser profile keeps recordings isolated from the user's Chrome.
+    profile_dir: ""
+    debugging_port: 9229
+    playback_timeout_seconds: 45
+    end_poll_seconds: 5
+    end_delay_seconds: 5
+    capture_health_check_seconds: 5
