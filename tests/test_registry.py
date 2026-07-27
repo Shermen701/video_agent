@@ -21,6 +21,11 @@ class RegistryTest(unittest.TestCase):
         provider = create_provider("mixlink", {"mixlink": {}})
         self.assertEqual(provider.provider_name, "mixlink")
 
+    def test_wechat_live_provider_is_registered(self) -> None:
+        self.assertIn("wechat_live", list_providers())
+        provider = create_provider("wechat_live", {"wechat_live": {}})
+        self.assertEqual(provider.provider_name, "wechat_live")
+
     def test_unknown_provider_fails_clearly(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown_provider"):
             create_provider("zoom", {})

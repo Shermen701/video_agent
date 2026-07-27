@@ -8,12 +8,14 @@ from video_agent.providers.dingtalk import DingTalkProvider
 from video_agent.providers.douyin_live import DouyinLiveProvider
 from video_agent.providers.mixlink import MixLinkProvider
 from video_agent.providers.tencent_meeting import TencentMeetingProvider
+from video_agent.providers.wechat_live import WeChatLiveProvider
 
 _PROVIDERS: dict[str, type[MeetingProvider]] = {
     DingTalkProvider.provider_name: DingTalkProvider,
     DouyinLiveProvider.provider_name: DouyinLiveProvider,
     MixLinkProvider.provider_name: MixLinkProvider,
     TencentMeetingProvider.provider_name: TencentMeetingProvider,
+    WeChatLiveProvider.provider_name: WeChatLiveProvider,
 }
 
 

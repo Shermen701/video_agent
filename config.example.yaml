@@ -32,6 +32,9 @@ platform:
     抖音直播: "douyin_live"
     Douyin: "douyin_live"
     Douyin Live: "douyin_live"
+    微信直播: "wechat_live"
+    视频号直播: "wechat_live"
+    视频号: "wechat_live"
   rsa_private_key_path: "config/iectp_rsa_private.pem"
   rsa_public_key_path: "config/iectp_rsa_public.pem"
   rsa_generate_if_missing: true
@@ -65,6 +68,7 @@ providers:
     login_retry_count: 2
     join_retry_count: 2
     meeting_end_poll_seconds: 5
+    capture_health_check_seconds: 5
   dingtalk:
     executable_path: ""
     window_title_regex: "钉钉|DingTalk|Ding"
@@ -73,8 +77,9 @@ providers:
     meeting_end_poll_seconds: 5
     password_prompt_timeout_seconds: 15
     startup_timeout_seconds: 90
-    login_click_ratio: [0.5, 0.74]
-    home_join_click_ratio: [0.45, 0.42]
+    # The CEF meeting home does not expose card controls.  This anchor is
+    # relative to its browser_window container, not the full DingTalk window.
+    home_join_webview_anchor: [0.31, 0.21]
   mixlink:
     executable_path: "D:\\Chint\\MixLink\\EzEasyLink.exe"
     login_retry_count: 2
@@ -90,4 +95,28 @@ providers:
     playback_timeout_seconds: 45
     end_poll_seconds: 5
     end_delay_seconds: 5
+    capture_health_check_seconds: 5
+  wechat_live:
+    executable_path: ""
+    window_title_regex: "微信|WeChat|Weixin"
+    startup_timeout_seconds: 45
+    navigation_timeout_seconds: 15
+    page_transition_timeout_seconds: 30
+    navigation_settle_seconds: 3
+    # Each icon click is accepted only after its destination page is visible.
+    # This makes slow network/icon rendering retry safely instead of stalling.
+    icon_click_retry_count: 3
+    icon_click_settle_seconds: 4
+    refresh_poll_seconds: 5
+    follow_scroll_max_pages: 80
+    # These ratios are only fallbacks when the installed WeChat build exposes
+    # no accessible name for the matching icon. Tune them with inspect_wechat.
+    video_channel_click_ratio: [0.042, 0.475]
+    # Icon-only controls use edge anchors so resolution changes do not shift
+    # the click location. Keep the ratio values below as legacy fallbacks.
+    profile_click_anchor: ["right", 43, "top", 94]
+    follow_click_anchor: ["left", 109, "top", 181]
+    profile_click_ratio: [0.973, 0.083]
+    follow_click_ratio: [0.07, 0.16]
+    refresh_click_ratio: [0.07, 0.10]
     capture_health_check_seconds: 5

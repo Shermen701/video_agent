@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from video_agent.app_discovery import find_tencent_meeting_executable
-from video_agent.models import Credentials, MeetingInfo
+from video_agent.models import CaptureTarget, Credentials, MeetingInfo
 from video_agent.process_control import shutdown_matching_processes
 from video_agent.providers.base import MeetingProvider
 
@@ -17,6 +17,10 @@ class TencentMeetingProvider(MeetingProvider):
     provider_name = "tencent_meeting"
     LOGIN_GUIDE_PAGE = "QApplication.wemeet://page/guide"
     IN_MEETING_PAGE = "QApplication.wemeet://page/inmeeting"
+    AFTER_MEETING_CONFIRM_AUTOMATION_ID = (
+        "QApplication.AfterMeetingDialog.DialogWidget.MainWidget."
+        "conclusion_widget.meeting_conclusion_content.QFWidget.conform_button"
+    )
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -88,6 +92,24 @@ class TencentMeetingProvider(MeetingProvider):
         self._click_if_present(["静音", "解除静音", "麦克风"])
         self._click_if_present(["关闭视频", "开启视频", "摄像头"])
 
+    def get_capture_target(self) -> CaptureTarget | None:
+        """Bind OBS to this task's Tencent Meeting window, never a stale source."""
+        if self.meeting_window is None and not self._connect_in_meeting_window(timeout_seconds=2):
+            raise RuntimeError("recording_failed: Tencent Meeting window is unavailable")
+        if self.meeting_window is None:
+            raise RuntimeError("recording_failed: Tencent Meeting window is unavailable")
+        try:
+            handle = int(self.meeting_window.handle)
+        except Exception as exc:
+            raise RuntimeError("recording_failed: Tencent Meeting window handle is unavailable") from exc
+        if not self._window_is_available(handle):
+            raise RuntimeError("recording_failed: Tencent Meeting window is no longer visible")
+        return self._capture_target_from_handle(handle)
+
+    def capture_health_check_seconds(self) -> float:
+        """Reject a black OBS window capture before a bad recording is uploaded."""
+        return max(0.0, float(self.config.get("capture_health_check_seconds", 5)))
+
     def wait_until_finished(self, deadline: datetime) -> None:
         poll_seconds = int(self.config.get("meeting_end_poll_seconds") or 5)
         while datetime.now(deadline.tzinfo).astimezone() < deadline:
@@ -136,14 +158,7 @@ class TencentMeetingProvider(MeetingProvider):
 
         from pywinauto import Desktop, mouse  # type: ignore
 
-        settings_ratio = self.config.get("home_settings_click_ratio") or [0.063, 0.831]
-        left, top, width, height = self._window_bounds()
-        mouse.click(
-            coords=(
-                int(left + width * float(settings_ratio[0])),
-                int(top + height * float(settings_ratio[1])),
-            )
-        )
+        self._open_home_settings(mouse)
 
         deadline = time.monotonic() + 5
         settings = None
@@ -179,13 +194,7 @@ class TencentMeetingProvider(MeetingProvider):
         mouse.move(coords=scroll_point)
         mouse.scroll(coords=scroll_point, wheel_dist=-20)
         time.sleep(0.5)
-        logout_ratio = self.config.get("logout_click_ratio") or [0.92, 0.883]
-        mouse.click(
-            coords=(
-                int(rect.left + rect.width() * float(logout_ratio[0])),
-                int(rect.top + rect.height() * float(logout_ratio[1])),
-            )
-        )
+        self._click_logout_control(settings)
 
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -197,6 +206,94 @@ class TencentMeetingProvider(MeetingProvider):
                 return
         raise RuntimeError("Tencent Meeting logout did not return to the login page")
 
+    def _open_home_settings(self, mouse: Any | None = None) -> None:
+        settings_entry = self._find_home_settings_entry()
+        if settings_entry is not None:
+            rect = settings_entry.rectangle()
+            self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+            return
+        if mouse is None:
+            from pywinauto import mouse  # type: ignore
+        settings_ratio = self.config.get("home_settings_click_ratio") or [0.063, 0.831]
+        left, top, width, height = self._window_bounds()
+        mouse.click(
+            coords=(
+                int(left + width * float(settings_ratio[0])),
+                int(top + height * float(settings_ratio[1])),
+            )
+        )
+
+    def _find_home_settings_entry(self) -> Any | None:
+        """Find the settings icon as the middle item in the sidebar's bottom trio."""
+        if self.window is None:
+            return None
+        try:
+            window_rect = self.window.rectangle()
+            controls = self.window.descendants()
+        except Exception:
+            return None
+        sidebar_icons: list[Any] = []
+        for control in controls:
+            try:
+                automation_id = str(control.element_info.automation_id or "")
+                if ".NXQtImage:" not in automation_id:
+                    continue
+                rect = control.rectangle()
+                if not (40 <= rect.width() <= 60 and 40 <= rect.height() <= 60):
+                    continue
+                if rect.left > window_rect.left + 160:
+                    continue
+                sidebar_icons.append(control)
+            except Exception:
+                continue
+        if len(sidebar_icons) < 3:
+            return None
+        sidebar_icons.sort(key=lambda control: control.rectangle().top)
+        return sidebar_icons[-2]
+
+    def _click_logout_control(self, settings: Any) -> None:
+        """Click the bottom-most visible action in the account-security page.
+
+        Tencent Meeting exposes the label inside the logout button as an unnamed
+        ``NXQtText`` node.  Its automation id changes each run, so select it by
+        its stable containment, right-column placement, and bottom-most order
+        after the account-security page has been scrolled to the end.
+        """
+        logout = self._find_logout_control(settings)
+        if logout is None:
+            raise RuntimeError("Tencent Meeting logout control not found")
+        rect = logout.rectangle()
+        self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+
+    @staticmethod
+    def _find_logout_control(settings: Any) -> Any | None:
+        try:
+            settings_rect = settings.rectangle()
+            controls = settings.descendants()
+        except Exception:
+            return None
+
+        candidates: list[Any] = []
+        content_left = settings_rect.left + settings_rect.width() * 0.75
+        for control in controls:
+            try:
+                automation_id = str(control.element_info.automation_id or "")
+                if "SettingPageContainer" not in automation_id or ".NXQtText:" not in automation_id:
+                    continue
+                rect = control.rectangle()
+                if rect.width() < 20 or rect.height() < 10:
+                    continue
+                if rect.left < content_left or rect.right > settings_rect.right:
+                    continue
+                if rect.top < settings_rect.top + settings_rect.height() * 0.5:
+                    continue
+                candidates.append(control)
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        return max(candidates, key=lambda control: control.rectangle().top)
+
     def _meeting_has_finished(self) -> bool:
         if self.config.get("disable_meeting_end_text_detection"):
             return False
@@ -206,16 +303,72 @@ class TencentMeetingProvider(MeetingProvider):
             except Exception:
                 handle = 0
             if handle and not self._window_exists(handle):
-                return True
+                return self._finalize_meeting_end()
             if handle:
-                return self._window_has_end_text(self.meeting_window)
+                if self._window_has_end_text(self.meeting_window):
+                    return self._finalize_meeting_end()
+                return False
         try:
             self._connect_window(timeout_seconds=1)
         except Exception:
-            return True
+            return self._finalize_meeting_end()
         if self._is_login_page():
             return False
-        return self._has_text(["加入会议", "快速会议", "预定会议", "会议已结束"])
+        if self._has_text(["加入会议", "快速会议", "预定会议", "会议已结束"]):
+            return self._finalize_meeting_end()
+        return False
+
+    def _finalize_meeting_end(self) -> bool:
+        self._dismiss_after_meeting_dialog_if_present()
+        return True
+
+    def _dismiss_after_meeting_dialog_if_present(self) -> bool:
+        """Dismiss Tencent Meeting's explicit post-meeting acknowledgement.
+
+        The dialog is attached to the returned home window, and its visual label
+        is not exposed.  Its Button automation id is stable, so never infer it
+        from screen position or click an arbitrary acknowledgement button.
+        """
+        button = self._find_after_meeting_confirm_button()
+        if button is None:
+            return False
+        try:
+            button.invoke()
+        except Exception:
+            try:
+                button.click_input()
+            except Exception:
+                return False
+        return True
+
+    def _find_after_meeting_confirm_button(self) -> Any | None:
+        roots: list[Any] = [root for root in (self.window, self.meeting_window) if root is not None]
+        try:
+            from pywinauto import Desktop  # type: ignore
+
+            roots.extend(Desktop(backend="uia").windows(visible_only=True))
+        except Exception:
+            pass
+        seen: set[int] = set()
+        for root in roots:
+            try:
+                handle = int(root.handle)
+            except Exception:
+                handle = id(root)
+            if handle in seen:
+                continue
+            seen.add(handle)
+            try:
+                controls = [root, *root.descendants()]
+            except Exception:
+                continue
+            for control in controls:
+                try:
+                    if str(control.element_info.automation_id or "") == self.AFTER_MEETING_CONFIRM_AUTOMATION_ID:
+                        return control
+                except Exception:
+                    continue
+        return None
 
     def _connect_window(self, timeout_seconds: int) -> None:
         self._ensure_pywinauto()
@@ -269,6 +422,52 @@ class TencentMeetingProvider(MeetingProvider):
             return bool(win32gui.IsWindow(handle))
         except Exception:
             return False
+
+    @staticmethod
+    def _window_is_available(handle: int) -> bool:
+        try:
+            import win32gui  # type: ignore
+
+            return bool(win32gui.IsWindow(handle) and win32gui.IsWindowVisible(handle))
+        except Exception:
+            return False
+
+    def _capture_target_from_handle(self, handle: int) -> CaptureTarget:
+        try:
+            import win32gui  # type: ignore
+            import win32process  # type: ignore
+
+            title = str(win32gui.GetWindowText(handle) or "")
+            class_name = str(win32gui.GetClassName(handle) or "")
+            _, process_id = win32process.GetWindowThreadProcessId(handle)
+            executable_name = self._process_executable_name(process_id)
+        except Exception as exc:
+            raise RuntimeError("recording_failed: failed to inspect Tencent Meeting window") from exc
+        if not title or not class_name or not executable_name:
+            raise RuntimeError("recording_failed: Tencent Meeting window identity is incomplete")
+        return CaptureTarget(title, class_name, executable_name)
+
+    @staticmethod
+    def _process_executable_name(process_id: int) -> str:
+        import ctypes
+        from ctypes import wintypes
+
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information, False, int(process_id)
+        )
+        if not handle:
+            raise OSError(f"cannot open Tencent Meeting process {process_id}")
+        try:
+            size = wintypes.DWORD(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size)
+            ):
+                raise OSError(f"cannot query Tencent Meeting process {process_id}")
+            return Path(buffer.value).name
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
 
     @staticmethod
     def _window_has_end_text(window: Any) -> bool:
@@ -404,7 +603,35 @@ class TencentMeetingProvider(MeetingProvider):
     def _click_phone_login_if_present(self) -> None:
         if self._click_if_present(["手机号"]):
             return
+        entry = self._find_phone_login_entry()
+        if entry is not None:
+            rect = entry.rectangle()
+            self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+            return
         self._click_ratio(self.config.get("phone_login_click_ratio") or [0.17, 0.76])
+
+    def _find_phone_login_entry(self) -> Any | None:
+        """Find the leftmost large login-method tile in Tencent Meeting's guide."""
+        if self.window is None:
+            return None
+        candidates: list[Any] = []
+        try:
+            controls = self.window.descendants()
+        except Exception:
+            return None
+        for control in controls:
+            try:
+                automation_id = str(control.element_info.automation_id or "")
+                if ".NXQtHoverTipContainer:" not in automation_id:
+                    continue
+                rect = control.rectangle()
+                if rect.width() >= 80 and rect.height() >= 100:
+                    candidates.append(control)
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        return min(candidates, key=lambda control: control.rectangle().left)
 
     def _wait_for_phone_login_form(self) -> None:
         timeout_seconds = float(self.config.get("login_form_timeout_seconds") or 15)
@@ -476,6 +703,12 @@ class TencentMeetingProvider(MeetingProvider):
             return ""
 
     def _dismiss_agreement_prompt_if_present(self) -> None:
+        accept = self._find_agreement_accept_control()
+        if accept is not None:
+            rect = accept.rectangle()
+            self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+            time.sleep(0.5)
+            return
         rect = self._text_rectangle("为保障您的合法权益")
         if rect is None:
             return
@@ -484,6 +717,46 @@ class TencentMeetingProvider(MeetingProvider):
             return
         self._click_ratio(self.config.get("agreement_prompt_accept_click_ratio") or [0.73, 0.55])
         time.sleep(0.5)
+
+    def _find_agreement_accept_control(self) -> Any | None:
+        """Find the rightmost action in the Tencent Meeting agreement alert."""
+        if self.window is None:
+            return None
+        try:
+            controls = self.window.descendants()
+        except Exception:
+            return None
+        alert = next(
+            (
+                control
+                for control in controls
+                if str(getattr(control.element_info, "automation_id", "") or "")
+                == "QApplication.wemeet://page/nxui/alert"
+            ),
+            None,
+        )
+        if alert is None:
+            return None
+        try:
+            alert_rect = alert.rectangle()
+        except Exception:
+            return None
+        actions: list[Any] = []
+        for control in controls:
+            try:
+                automation_id = str(control.element_info.automation_id or "")
+                if not automation_id.startswith("QApplication.wemeet://page/nxui/alert"):
+                    continue
+                if ".NXQtText:" not in automation_id:
+                    continue
+                rect = control.rectangle()
+                if rect.top >= alert_rect.top + alert_rect.height() * 0.5 and rect.height() > 0:
+                    actions.append(control)
+            except Exception:
+                continue
+        if not actions:
+            return None
+        return max(actions, key=lambda control: control.rectangle().left)
 
     def _click_first(self, names: list[str]) -> None:
         for name in names:
@@ -495,7 +768,44 @@ class TencentMeetingProvider(MeetingProvider):
     def _click_login(self) -> None:
         if self._click_if_present(["登录", "Login"]):
             return
+        submit = self._find_login_submit_control()
+        if submit is not None:
+            rect = submit.rectangle()
+            self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+            return
         self._click_ratio(self.config.get("login_click_ratio") or [0.5, 0.53])
+
+    def _find_login_submit_control(self) -> Any | None:
+        """Find the centered action immediately below the phone/password edits."""
+        if self.window is None:
+            return None
+        edits = self._edit_controls()
+        if len(edits) < 2:
+            return None
+        try:
+            form_bottom = max(edit.rectangle().bottom for edit in edits)
+            window_rect = self.window.rectangle()
+            window_center = (window_rect.left + window_rect.right) / 2
+            controls = self.window.descendants()
+        except Exception:
+            return None
+        actions: list[Any] = []
+        for control in controls:
+            try:
+                automation_id = str(control.element_info.automation_id or "")
+                if ".NXQtText:" not in automation_id:
+                    continue
+                rect = control.rectangle()
+                if rect.top <= form_bottom or rect.height() <= 0:
+                    continue
+                if abs(((rect.left + rect.right) / 2) - window_center) > window_rect.width() * 0.2:
+                    continue
+                actions.append(control)
+            except Exception:
+                continue
+        if not actions:
+            return None
+        return min(actions, key=lambda control: control.rectangle().top)
 
     def _click_if_present(self, names: list[str]) -> bool:
         if self.window is None:
@@ -512,14 +822,51 @@ class TencentMeetingProvider(MeetingProvider):
         if self.window is None:
             raise RuntimeError("Tencent Meeting window is not connected")
 
-        self._bring_window_to_front()
-        ratio = self.config.get("home_join_click_ratio") or [0.21, 0.34]
-        if not isinstance(ratio, list | tuple) or len(ratio) != 2:
-            raise RuntimeError("home_join_click_ratio must be a two-item list")
-        left, top, width, height = self._window_bounds()
-        x = int(left + width * float(ratio[0]))
-        y = int(top + height * float(ratio[1]))
-        self._native_click(x, y)
+        timeout_seconds = float(self.config.get("home_join_control_timeout_seconds") or 3)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            entry = self._find_home_join_entry()
+            if entry is not None:
+                rect = entry.rectangle()
+                self._click_absolute(rect.left + rect.width() // 2, rect.top + rect.height() // 2)
+                return
+            time.sleep(0.2)
+        raise RuntimeError("Tencent Meeting join entry control did not appear")
+
+    def _find_home_join_entry(self) -> Any | None:
+        """Find the first large quick-action icon in the Tencent Meeting home content."""
+        if self.window is None:
+            return None
+        try:
+            window_rect = self.window.rectangle()
+            controls = self.window.descendants()
+        except Exception:
+            return None
+        icons: list[Any] = []
+        for control in controls:
+            try:
+                automation_id = str(control.element_info.automation_id or "")
+                if ".NXQtImage:" not in automation_id:
+                    continue
+                rect = control.rectangle()
+                # The quick-action icon scales with the window DPI.  Use its
+                # proportion of the current window instead of a fixed pixel
+                # range, which would silently fall back to a wrong coordinate
+                # after a display-scale change.
+                width_ratio = rect.width() / max(1, window_rect.width())
+                height_ratio = rect.height() / max(1, window_rect.height())
+                if not (0.04 <= width_ratio <= 0.12 and 0.07 <= height_ratio <= 0.16):
+                    continue
+                # The sidebar is a fixed narrow rail; quick actions begin in
+                # the home content area to its right.
+                if rect.left <= window_rect.left + window_rect.width() * 0.12:
+                    continue
+                icons.append(control)
+            except Exception:
+                continue
+        if not icons:
+            return None
+        return min(icons, key=lambda control: (control.rectangle().top, control.rectangle().left))
 
     def _click_ratio(self, ratio: Any) -> None:
         if self.window is None:
@@ -654,6 +1001,12 @@ class TencentMeetingProvider(MeetingProvider):
 
     def _fill_login_credentials(self, credentials: Credentials) -> None:
         edits = self._edit_controls()
+        phone_edit = self._find_edit_by_name(edits, "请输入手机号码")
+        password_edit = self._find_edit_by_name(edits, "请输入密码")
+        if phone_edit is not None and password_edit is not None:
+            self._set_login_edit_text(phone_edit, credentials.account)
+            self._set_login_edit_text(password_edit, credentials.password)
+            return
         if len(edits) >= 3:
             self._set_login_edit_text(edits[1], credentials.account)
             self._set_login_edit_text(edits[2], credentials.password)
@@ -663,6 +1016,17 @@ class TencentMeetingProvider(MeetingProvider):
             self._set_login_edit_text(edits[1], credentials.password)
             return
         raise RuntimeError("login input controls not found")
+
+    @staticmethod
+    def _find_edit_by_name(edits: list[Any], expected_name: str) -> Any | None:
+        for edit in edits:
+            try:
+                name = str(getattr(edit.element_info, "name", "") or "")
+                if name == expected_name:
+                    return edit
+            except Exception:
+                continue
+        return None
 
     @staticmethod
     def _set_login_edit_text(edit: Any, text: str) -> None:

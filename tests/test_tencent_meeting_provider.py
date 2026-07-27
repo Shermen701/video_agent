@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from video_agent.models import Credentials, MeetingInfo
+from video_agent.models import CaptureTarget, Credentials, MeetingInfo
 from video_agent.providers.tencent_meeting import TencentMeetingProvider
 
 
@@ -53,7 +53,40 @@ class FakeEdit:
         self.typed.append(value)
 
 
+class FakeControl:
+    def __init__(self, automation_id: str, rect: FakeRect | None = None) -> None:
+        self.element_info = SimpleNamespace(automation_id=automation_id)
+        self._rect = rect or FakeRect()
+
+    def rectangle(self) -> FakeRect:
+        return self._rect
+
+
 class TencentMeetingProviderTest(unittest.TestCase):
+    def test_capture_target_uses_the_current_tencent_meeting_window(self) -> None:
+        provider = TencentMeetingProvider({})
+        provider.meeting_window = SimpleNamespace(handle=123)
+        target = CaptureTarget("腾讯会议", "BaseDialog", "WeMeetApp.exe")
+
+        with patch.object(provider, "_window_is_available", return_value=True), patch.object(
+            provider, "_capture_target_from_handle", return_value=target
+        ) as capture:
+            self.assertEqual(provider.get_capture_target(), target)
+
+        capture.assert_called_once_with(123)
+
+    def test_capture_target_refuses_an_invisible_tencent_meeting_window(self) -> None:
+        provider = TencentMeetingProvider({})
+        provider.meeting_window = SimpleNamespace(handle=123)
+
+        with patch.object(provider, "_window_is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "no longer visible"):
+                provider.get_capture_target()
+
+    def test_tencent_capture_health_check_defaults_to_five_seconds(self) -> None:
+        self.assertEqual(TencentMeetingProvider({}).capture_health_check_seconds(), 5.0)
+        self.assertEqual(TencentMeetingProvider({"capture_health_check_seconds": 0}).capture_health_check_seconds(), 0.0)
+
     def test_login_guide_is_recognized_before_text_finishes_loading(self) -> None:
         provider = TencentMeetingProvider({})
         provider.window = FakeWindow(TencentMeetingProvider.LOGIN_GUIDE_PAGE)
@@ -82,6 +115,18 @@ class TencentMeetingProviderTest(unittest.TestCase):
         invoke.assert_called_once_with("同意")
         click.assert_not_called()
 
+    def test_agreement_prompt_prefers_structural_right_action(self) -> None:
+        provider = TencentMeetingProvider({})
+        action = FakeControl("QApplication.wemeet://page/nxui/alert.NXQtText:123")
+
+        with patch.object(provider, "_find_agreement_accept_control", return_value=action), patch.object(
+            provider, "_click_absolute"
+        ) as click, patch.object(provider, "_click_ratio") as fallback, patch("time.sleep"):
+            provider._dismiss_agreement_prompt_if_present()
+
+        click.assert_called_once_with(200, 220)
+        fallback.assert_not_called()
+
     def test_password_login_mode_is_selected_before_credentials(self) -> None:
         provider = TencentMeetingProvider({})
 
@@ -93,6 +138,66 @@ class TencentMeetingProviderTest(unittest.TestCase):
             provider._select_password_login()
 
         click.assert_called_once_with(["密码登录", "手机密码登录"])
+
+    def test_phone_login_prefers_structural_login_tile_over_ratio_fallback(self) -> None:
+        provider = TencentMeetingProvider({})
+        tile = FakeControl("root.NXQtHoverTipContainer:123")
+
+        with patch.object(provider, "_click_if_present", return_value=False), patch.object(
+            provider, "_find_phone_login_entry", return_value=tile
+        ), patch.object(provider, "_click_absolute") as click, patch.object(provider, "_click_ratio") as fallback:
+            provider._click_phone_login_if_present()
+
+        click.assert_called_once_with(200, 220)
+        fallback.assert_not_called()
+
+    def test_login_submit_prefers_structural_action_over_ratio_fallback(self) -> None:
+        provider = TencentMeetingProvider({})
+        action = FakeControl("root.NXQtText:123")
+
+        with patch.object(provider, "_click_if_present", return_value=False), patch.object(
+            provider, "_find_login_submit_control", return_value=action
+        ), patch.object(provider, "_click_absolute") as click, patch.object(provider, "_click_ratio") as fallback:
+            provider._click_login()
+
+        click.assert_called_once_with(200, 220)
+        fallback.assert_not_called()
+
+    def test_home_join_prefers_structural_quick_action_over_ratio_fallback(self) -> None:
+        provider = TencentMeetingProvider({})
+        provider.window = FakeWindow()
+        action = FakeControl("root.NXQtImage:123")
+
+        with patch.object(provider, "_find_home_join_entry", return_value=action), patch.object(
+            provider, "_click_absolute"
+        ) as click, patch.object(provider, "_native_click") as fallback:
+            provider._click_home_join_fallback()
+
+        click.assert_called_once_with(200, 220)
+        fallback.assert_not_called()
+
+    def test_home_settings_prefers_structural_sidebar_icon(self) -> None:
+        provider = TencentMeetingProvider({})
+        provider.window = FakeWindow()
+        icon = FakeControl("root.NXQtImage:123")
+
+        with patch.object(provider, "_find_home_settings_entry", return_value=icon), patch.object(
+            provider, "_click_absolute"
+        ) as click:
+            provider._open_home_settings()
+
+        click.assert_called_once_with(200, 220)
+
+    def test_logout_uses_structural_bottom_account_action(self) -> None:
+        provider = TencentMeetingProvider({})
+        action = FakeControl("root.SettingPageContainer.NXQtText:123")
+
+        with patch.object(provider, "_find_logout_control", return_value=action), patch.object(
+            provider, "_click_absolute"
+        ) as click:
+            provider._click_logout_control(FakeWindow())
+
+        click.assert_called_once_with(200, 220)
 
     def test_three_edit_phone_password_form_needs_no_mode_switch(self) -> None:
         provider = TencentMeetingProvider({})
@@ -157,8 +262,26 @@ class TencentMeetingProviderTest(unittest.TestCase):
         provider = TencentMeetingProvider({})
         provider.meeting_window = SimpleNamespace(handle=123)
 
-        with patch.object(provider, "_window_exists", return_value=False):
+        with patch.object(provider, "_window_exists", return_value=False), patch.object(
+            provider, "_dismiss_after_meeting_dialog_if_present"
+        ) as dismiss:
             self.assertTrue(provider._meeting_has_finished())
+
+        dismiss.assert_called_once_with()
+
+    def test_after_meeting_dialog_uses_its_exact_confirm_button(self) -> None:
+        provider = TencentMeetingProvider({})
+        button = SimpleNamespace(
+            element_info=SimpleNamespace(
+                automation_id=provider.AFTER_MEETING_CONFIRM_AUTOMATION_ID
+            ),
+            invoke=unittest.mock.Mock(),
+        )
+
+        with patch.object(provider, "_find_after_meeting_confirm_button", return_value=button):
+            self.assertTrue(provider._dismiss_after_meeting_dialog_if_present())
+
+        button.invoke.assert_called_once_with()
 
     def test_meeting_keeps_waiting_while_saved_meeting_window_exists(self) -> None:
         provider = TencentMeetingProvider({})
@@ -226,16 +349,26 @@ class TencentMeetingProviderTest(unittest.TestCase):
         invoke.assert_called_once_with("加入会议")
         click.assert_not_called()
 
-    def test_home_join_fallback_targets_join_meeting_tile(self) -> None:
+    def test_home_join_never_uses_window_ratio_when_control_is_missing(self) -> None:
         provider = TencentMeetingProvider({})
         provider.window = SimpleNamespace(handle=1)
 
-        with patch.object(provider, "_bring_window_to_front"), patch.object(
-            provider, "_window_bounds", return_value=(100, 200, 1000, 800)
-        ), patch.object(provider, "_native_click") as click:
-            provider._click_home_join_fallback()
+        with patch.object(provider, "_find_home_join_entry", return_value=None), patch(
+            "video_agent.providers.tencent_meeting.time.monotonic", side_effect=[0, 0.5, 4]
+        ), patch("video_agent.providers.tencent_meeting.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "join entry control did not appear"):
+                provider._click_home_join_fallback()
 
-        click.assert_called_once_with(310, 472)
+    def test_home_join_accepts_dpi_scaled_quick_action_icon(self) -> None:
+        provider = TencentMeetingProvider({})
+        window = SimpleNamespace(
+            rectangle=lambda: SimpleNamespace(left=100, top=200, right=2100, bottom=1400, width=lambda: 2000, height=lambda: 1200)
+        )
+        icon = FakeControl("root.NXQtImage:123", SimpleNamespace(left=420, top=500, right=564, bottom=644, width=lambda: 144, height=lambda: 144))
+        window.descendants = lambda: [icon]
+        provider.window = window
+
+        self.assertIs(provider._find_home_join_entry(), icon)
 
     def test_shutdown_logs_out_before_closing_verified_processes(self) -> None:
         provider = TencentMeetingProvider({"executable_path": r"D:\Chint\WeMeet\WeMeetApp.exe"})

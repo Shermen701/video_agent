@@ -81,6 +81,9 @@ class RecordingAgent:
 
             self.platform.report_status(task.id, TaskStatus.JOINING, "joining meeting")
             provider.ensure_logged_in(task.credentials)
+            set_recording_deadline = getattr(provider, "set_recording_deadline", None)
+            if callable(set_recording_deadline):
+                set_recording_deadline(task.end_time)
             provider.join(task.meeting)
             provider.prepare_audio_video()
 

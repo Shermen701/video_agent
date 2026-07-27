@@ -131,6 +131,72 @@ class EmbeddedPasswordPrompt(PasswordPrompt):
 
 
 class DingTalkProviderTest(unittest.TestCase):
+    def test_join_card_uses_anchor_relative_to_meeting_webview(self) -> None:
+        provider = DingTalkProvider({"home_join_webview_anchor": [0.31, 0.21]})
+        rect = type(
+            "Rect",
+            (), {"left": 400, "top": 200, "right": 1400, "bottom": 1000, "width": lambda _self: 1000, "height": lambda _self: 800},
+        )()
+        webview = type(
+            "WebView",
+            (), {
+                "element_info": type("Info", (), {"automation_id": "browser_window", "class_name": "client_ding::WebBrowserViewV2"})(),
+                "rectangle": lambda _self: rect,
+            },
+        )()
+        provider.window = type("Window", (), {"descendants": lambda _self: [webview]})()
+
+        with patch.object(provider, "_bring_window_to_front"), patch.object(
+            provider, "_native_click"
+        ) as click, patch("video_agent.providers.dingtalk.time.sleep"):
+            provider._click_join_meeting_card()
+
+        click.assert_called_once_with(710, 368)
+
+    def test_join_card_fails_when_meeting_webview_is_missing(self) -> None:
+        provider = DingTalkProvider({})
+        provider.window = type("Window", (), {"descendants": lambda _self: []})()
+
+        with self.assertRaisesRegex(RuntimeError, "WebView control not found"):
+            provider._click_join_meeting_card()
+
+    def test_meeting_navigation_fails_instead_of_using_a_window_ratio(self) -> None:
+        provider = DingTalkProvider({})
+        provider.window = type(
+            "Window",
+            (), {"child_window": lambda _self, **_kwargs: type("Nav", (), {"children": lambda _nav: []})()},
+        )()
+
+        with self.assertRaisesRegex(RuntimeError, "meeting navigation control not found"):
+            provider._navigate_to_meeting_home()
+
+    def test_login_submit_prefers_its_auto_id_over_window_ratio(self) -> None:
+        provider = DingTalkProvider({})
+
+        with patch.object(provider, "_click_auto_id_if_present", return_value=True) as auto_id, patch.object(
+            provider, "_click_ratio"
+        ) as ratio:
+            provider._click_login()
+
+        auto_id.assert_called_once()
+        ratio.assert_not_called()
+
+    def test_login_submit_fails_instead_of_guessing_a_ratio(self) -> None:
+        provider = DingTalkProvider({})
+
+        with patch.object(provider, "_click_auto_id_if_present", return_value=False), patch.object(
+            provider, "_click_if_present", return_value=False
+        ), self.assertRaisesRegex(RuntimeError, "login submit control not found"):
+            provider._click_login()
+
+    def test_account_password_login_fails_instead_of_guessing_a_ratio(self) -> None:
+        provider = DingTalkProvider({})
+
+        with patch.object(provider, "_click_auto_id_if_present", return_value=False), patch.object(
+            provider, "_click_if_present", return_value=False
+        ), self.assertRaisesRegex(RuntimeError, "account password login control not found"):
+            provider._click_account_password_login_if_present()
+
     def test_launch_uses_dedicated_dingtalk_startup_timeout(self) -> None:
         provider = DingTalkProvider({"startup_timeout_seconds": 90})
         with patch.object(

@@ -23,6 +23,9 @@ DEFAULT_PROVIDER_ALIASES = {
     "MixLink": "mixlink",
     "mixlink": "mixlink",
     "dingtalk": "dingtalk",
+    "微信直播": "wechat_live",
+    "视频号直播": "wechat_live",
+    "视频号": "wechat_live",
 }
 
 
@@ -145,7 +148,13 @@ class PlatformClient:
             "maxRecordDuration": data.get("maxRecordDuration"),
             "livePlatform": live_platform,
         }
+        access_method = str(data.get("accessMethod") or "")
+        live_token = self._decrypt_credential(str(data.get("liveToken") or ""))
+        if provider == "wechat_live" and access_method == "搜索口令":
+            meeting_extra["searchCommand"] = live_token
         meeting_password = str(data.get("meetingPassword") or data.get("liveToken") or "")
+        if provider == "wechat_live":
+            meeting_password = ""
         return RecordingTask(
             id=str(data["id"]),
             meeting_provider=provider,

@@ -26,6 +26,10 @@ class MeetingProvider(ABC):
     def join(self, meeting: MeetingInfo) -> None:
         """Join a meeting."""
 
+    def set_recording_deadline(self, deadline: datetime) -> None:
+        """Receive the scheduled recording deadline before joining, when needed."""
+        return None
+
     @abstractmethod
     def prepare_audio_video(self) -> None:
         """Disable microphone/camera or apply provider defaults."""

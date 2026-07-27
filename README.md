@@ -48,6 +48,8 @@ OBS 需要预安装并启用 obs-websocket。腾讯会议和钉钉 UI 自动化�
 
 钉钉 provider 名为 `dingtalk`，平台任务中的 `livePlatform` 可通过 `platform.provider_aliases` 将 `钉钉`、`DingTalk` 或 `dingtalk` 映射到该 provider。钉钉登录会使用任务里的 `loginAccount` 和 `loginPassword` 自动填写账号密码；如果触发验证码、短信、扫码确认、设备验证等人工安全验证，Agent 会判定登录失败并在 diagnostics 中保留窗口文本，后续需要人工处理或调整录制机登录状态。
 
+微信视频号 provider 名为 `wechat_live`。任务需使用 `accessMethod: 搜索口令`，并将已关注视频号的显示昵称放在 `liveToken`（例如 `央视网`）。Agent 只连接录制机上已经登录的微信，不会使用任务账号密码，也不会在任务结束时退出微信。微信 UI 自动化必须在已登录、解锁的交互桌面会话中运行；可先执行 `py -m video_agent.tools.inspect_wechat` 采集窗口控件和截图，用于校准不同微信版本的图标定位。
+
 ## IECTP 接口
 
 Agent 会先调用 `platform.token_path` 获取 token，并在后续请求头中发送 `Authorization: <token>`。待录制任务来自 `platform.pending_tasks_path`，OBS 开始录制成功后调用 `platform.start_callback_path`，MinIO 上传完成或失败后调用 `platform.complete_callback_path`。

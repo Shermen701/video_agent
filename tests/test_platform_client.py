@@ -221,6 +221,52 @@ class PlatformClientTest(unittest.TestCase):
         assert task is not None
         self.assertEqual(task.meeting_provider, "dingtalk")
 
+    def test_maps_wechat_search_command_from_live_token(self) -> None:
+        fake_http = FakeHttp()
+        original_get = fake_http.get
+
+        def get_with_wechat_search_command(path: str, headers: dict[str, str] | None = None) -> HttpResponse:
+            response = original_get(path, headers)
+            response.data["data"][0]["livePlatform"] = "微信直播"
+            response.data["data"][0]["accessMethod"] = "搜索口令"
+            response.data["data"][0]["liveToken"] = "央视网"
+            return response
+
+        fake_http.get = get_with_wechat_search_command  # type: ignore[method-assign]
+        client = PlatformClient(PlatformConfig(api_token="token-1", rsa_generate_if_missing=False))
+        client.http = fake_http  # type: ignore[assignment]
+
+        task = client.get_next_task("recorder-001")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.meeting_provider, "wechat_live")
+        self.assertEqual(task.meeting.extra["accessMethod"], "搜索口令")
+        self.assertEqual(task.meeting.extra["searchCommand"], "央视网")
+        self.assertEqual(task.meeting.password, "")
+
+    def test_does_not_treat_wechat_non_search_live_token_as_password(self) -> None:
+        fake_http = FakeHttp()
+        original_get = fake_http.get
+
+        def get_with_wechat_link(path: str, headers: dict[str, str] | None = None) -> HttpResponse:
+            response = original_get(path, headers)
+            response.data["data"][0]["livePlatform"] = "视频号"
+            response.data["data"][0]["accessMethod"] = "直播链接"
+            response.data["data"][0]["liveToken"] = "not-a-password"
+            return response
+
+        fake_http.get = get_with_wechat_link  # type: ignore[method-assign]
+        client = PlatformClient(PlatformConfig(api_token="token-1", rsa_generate_if_missing=False))
+        client.http = fake_http  # type: ignore[assignment]
+
+        task = client.get_next_task("recorder-001")
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertNotIn("searchCommand", task.meeting.extra)
+        self.assertEqual(task.meeting.password, "")
+
     def test_maps_blank_plan_end_time_from_max_record_duration(self) -> None:
         fake_http = FakeHttp()
         original_get = fake_http.get

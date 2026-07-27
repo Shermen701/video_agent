@@ -46,6 +46,14 @@ MIXLINK_CANDIDATES = [
 ]
 MIXLINK_SHORTCUT_KEYWORDS = ["觅讯", "mixlink", "ezeasylink"]
 
+WECHAT_CANDIDATES = [
+    Path(r"C:\Program Files\Tencent\Weixin\Weixin.exe"),
+    Path(r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe"),
+    Path.home() / r"AppData\Roaming\Tencent\Weixin\Weixin.exe",
+    Path.home() / r"AppData\Local\Tencent\Weixin\Weixin.exe",
+]
+WECHAT_SHORTCUT_KEYWORDS = ["微信", "wechat", "weixin"]
+
 
 def find_obs_executable(override: str = "") -> Path | None:
     return _find_executable(override, OBS_CANDIDATES, OBS_SHORTCUT_KEYWORDS)
@@ -65,6 +73,10 @@ def find_dingtalk_executable(override: str = "") -> Path | None:
 
 def find_mixlink_executable(override: str = "") -> Path | None:
     return _find_executable(override, MIXLINK_CANDIDATES, MIXLINK_SHORTCUT_KEYWORDS)
+
+
+def find_wechat_executable(override: str = "") -> Path | None:
+    return _find_executable(override, WECHAT_CANDIDATES, WECHAT_SHORTCUT_KEYWORDS)
 
 
 def _find_executable(override: str, candidates: list[Path], shortcut_keywords: list[str]) -> Path | None:

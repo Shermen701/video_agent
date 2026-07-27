@@ -84,13 +84,11 @@ class DingTalkProvider(MeetingProvider):
         # top tab bar, not in this list. Tune per-machine if the client
         # introduces or hides more items.
         self.meeting_nav_index = int(config.get("meeting_nav_index") or 4)
-        # Placeholder ratios; recalibrated against real dumps on 2026-07-09.
-        # Re-tune per-machine if the DingTalk client moves things around.
-        self.home_join_click_ratio = list(
-            config.get("home_join_click_ratio") or [0.41, 0.26]
-        )
-        self.login_click_ratio = list(
-            config.get("login_click_ratio") or [0.50, 0.68]
+        # The meeting home is a CEF WebView with no accessible card controls.
+        # Keep this anchor relative to the WebView itself, never the whole
+        # DingTalk window (whose sidebars/title bar change independently).
+        self.home_join_webview_anchor = list(
+            config.get("home_join_webview_anchor") or [0.31, 0.21]
         )
 
     # ============================== public lifecycle ==============================
@@ -215,6 +213,7 @@ class DingTalkProvider(MeetingProvider):
     def capture_diagnostics(self, task_dir: Path) -> Path | None:
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "diagnostic.txt"
+        screenshot = task_dir / "dingtalk-window.png"
         lines = ["DingTalk diagnostics"]
         try:
             self._connect_window(timeout_seconds=1)
@@ -222,10 +221,11 @@ class DingTalkProvider(MeetingProvider):
                 lines.append(str(self.window.window_text()))
                 lines.append(str(self.window.texts()))
                 lines.extend(self._control_texts())
+                self.window.capture_as_image().save(screenshot)
         except Exception as exc:
             lines.append(f"diagnostic_error={exc}")
         path.write_text("\n".join(lines), encoding="utf-8")
-        return path
+        return screenshot if screenshot.exists() else path
 
     def cleanup(self) -> None:
         self.meeting_window = None
@@ -329,7 +329,7 @@ class DingTalkProvider(MeetingProvider):
     def _navigate_to_meeting_home(self) -> None:
         """Click the meeting-app nav item (left sidebar) to load the meeting work area."""
         if self.window is None:
-            return
+            raise RuntimeError("DingTalk window is not connected")
         try:
             scroll_view = self.window.child_window(auto_id=_NAV_BAR_AUTO_ID)
             items = scroll_view.children()
@@ -341,14 +341,8 @@ class DingTalkProvider(MeetingProvider):
             self._bring_window_to_front()
             self._native_click(cx, cy)
             time.sleep(2.0)  # let DingTalk switch + load the webview
-        except Exception:
-            # Fallback ratio: roughly index-aligned within the nav strip.
-            rect = self.window.rectangle()
-            self._native_click(
-                int(rect.left + rect.width() * 0.10),
-                int(rect.top + rect.height() * (0.15 + 0.045 * self.meeting_nav_index)),
-            )
-            time.sleep(2.0)
+        except Exception as exc:
+            raise RuntimeError("DingTalk meeting navigation control not found") from exc
 
     def _click_join_meeting_card(self) -> None:
         """Click the '加入会议' card on the meeting app home page."""
@@ -370,14 +364,42 @@ class DingTalkProvider(MeetingProvider):
                         return
             except Exception:
                 continue
-        # Fallback: ratio against the main window.
-        rect = self.window.rectangle()
+        webview = self._find_meeting_home_webview()
+        if webview is None:
+            raise RuntimeError("DingTalk meeting home WebView control not found")
+        anchor = self.home_join_webview_anchor
+        if not isinstance(anchor, list | tuple) or len(anchor) != 2:
+            raise RuntimeError("home_join_webview_anchor must be a two-item list")
+        x_ratio, y_ratio = (float(anchor[0]), float(anchor[1]))
+        if not (0.0 < x_ratio < 1.0 and 0.0 < y_ratio < 1.0):
+            raise RuntimeError("home_join_webview_anchor values must be between 0 and 1")
+        rect = webview.rectangle()
         self._bring_window_to_front()
         self._native_click(
-            int(rect.left + rect.width() * self.home_join_click_ratio[0]),
-            int(rect.top + rect.height() * self.home_join_click_ratio[1]),
+            int(rect.left + rect.width() * x_ratio),
+            int(rect.top + rect.height() * y_ratio),
         )
         time.sleep(2.5)
+
+    def _find_meeting_home_webview(self) -> Any | None:
+        if self.window is None:
+            return None
+        try:
+            controls = self.window.descendants()
+        except Exception:
+            return None
+        for control in controls:
+            try:
+                info = control.element_info
+                automation_id = str(info.automation_id or "")
+                class_name = str(info.class_name or "")
+                if automation_id == "browser_window" or class_name == "client_ding::WebBrowserViewV2":
+                    rect = control.rectangle()
+                    if rect.width() > 100 and rect.height() > 100:
+                        return control
+            except Exception:
+                continue
+        return None
 
     def _find_join_dialog_window(self, timeout_seconds: int) -> Any | None:
         return self._find_titled_meeting_window(timeout_seconds, expect_prepare=True)
@@ -699,8 +721,7 @@ class DingTalkProvider(MeetingProvider):
             return
         if self._click_if_present(["手机号登录"]):
             return
-        if self.config.get("password_login_click_ratio"):
-            self._click_ratio(self.config["password_login_click_ratio"])
+        raise RuntimeError("DingTalk account password login control not found")
 
     def _click_auto_id_if_present(self, auto_id: str) -> bool:
         if self.window is None:
@@ -724,20 +745,11 @@ class DingTalkProvider(MeetingProvider):
         self._set_edit_text(password, credentials.password)
 
     def _click_login(self) -> None:
-        if self.window is not None:
-            try:
-                btn = self.window.child_window(auto_id=_LOGIN_BUTTON_AUTO_ID)
-                rect = btn.rectangle()
-                self._bring_window_to_front()
-                self._native_click(
-                    (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
-                )
-                return
-            except Exception:
-                pass
+        if self._click_auto_id_if_present(_LOGIN_BUTTON_AUTO_ID):
+            return
         if self._click_if_present(["登录", "Login"]):
             return
-        self._click_ratio(self.login_click_ratio)
+        raise RuntimeError("DingTalk login submit control not found")
 
     # ============================== window + generic helpers ==============================
 
