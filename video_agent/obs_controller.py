@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from io import BytesIO
+import logging
 import subprocess
 import socket
 import time
@@ -20,6 +21,8 @@ CAPTURE_SCENE_NAME = "VideoAgent-DingTalk"
 CAPTURE_INPUT_NAME = "VideoAgent-DingTalk-Window"
 CAPTURE_AUDIO_INPUT_NAME = "VideoAgent-Application-Audio"
 APPLICATION_AUDIO_CAPTURE_KIND = "wasapi_process_output_capture"
+
+LOGGER = logging.getLogger("video_agent")
 
 
 class ObsController:
@@ -59,13 +62,30 @@ class ObsController:
         time.sleep(min(self.config.startup_timeout_seconds, 5))
 
     def connect(self) -> None:
+        # obsws-python logs connection parameters (including the password) and
+        # a full traceback for every refused cold-start connection.  Keep SDK
+        # internals quiet and report concise, redacted lifecycle messages here.
+        logging.getLogger("obsws_python").setLevel(logging.CRITICAL + 1)
         try:
             from obsws_python import ReqClient  # type: ignore
         except ModuleNotFoundError as exc:
             raise RuntimeError("obsws-python is not installed; run pip install -r requirements.txt") from exc
         deadline = time.monotonic() + self.config.startup_timeout_seconds
         last_error: Exception | None = None
+        waiting_logged = False
         while time.monotonic() < deadline:
+            if not self._is_websocket_port_open():
+                if not waiting_logged:
+                    LOGGER.info(
+                        "waiting for OBS WebSocket: host=%s port=%s timeout=%ss",
+                        self.config.websocket_host,
+                        self.config.websocket_port,
+                        self.config.startup_timeout_seconds,
+                    )
+                    waiting_logged = True
+                self._dismiss_recovery_dialog_if_present()
+                time.sleep(1)
+                continue
             try:
                 self._client = ReqClient(
                     host=self.config.websocket_host,
@@ -73,11 +93,22 @@ class ObsController:
                     password=self.config.websocket_password,
                     timeout=5,
                 )
+                LOGGER.info(
+                    "connected to OBS WebSocket: host=%s port=%s",
+                    self.config.websocket_host,
+                    self.config.websocket_port,
+                )
                 return
             except Exception as exc:
                 last_error = exc
                 self._dismiss_recovery_dialog_if_present()
                 time.sleep(1)
+        if last_error is None:
+            raise RuntimeError(
+                f"{ErrorCode.OBS_WEBSOCKET_FAILED.value}: OBS WebSocket "
+                f"{self.config.websocket_host}:{self.config.websocket_port} did not become ready "
+                f"within {self.config.startup_timeout_seconds} seconds"
+            )
         raise RuntimeError(f"{ErrorCode.OBS_WEBSOCKET_FAILED.value}: {last_error}") from last_error
 
     def start_recording(self, task_dir: Path) -> None:

@@ -5,7 +5,7 @@ from io import BytesIO
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
@@ -121,6 +121,51 @@ class ObsWindowCaptureTest(unittest.TestCase):
         ):
             controller.ensure_running()
         self.assertTrue(wait.called)
+
+    def test_connect_waits_for_port_before_creating_obs_client(self) -> None:
+        controller = ObsController(ObsConfig(startup_timeout_seconds=5))
+        client = object()
+        req_client = MagicMock(return_value=client)
+        fake_module = SimpleNamespace(ReqClient=req_client)
+
+        with patch.dict("sys.modules", {"obsws_python": fake_module}), patch.object(
+            controller, "_is_websocket_port_open", side_effect=[False, False, True]
+        ) as port_open, patch.object(
+            controller, "_dismiss_recovery_dialog_if_present"
+        ) as dismiss, patch(
+            "video_agent.obs_controller.time.sleep"
+        ) as sleep:
+            controller.connect()
+
+        self.assertIs(controller._client, client)
+        self.assertEqual(port_open.call_count, 3)
+        self.assertEqual(dismiss.call_count, 2)
+        self.assertEqual(sleep.call_count, 2)
+        req_client.assert_called_once_with(
+            host="127.0.0.1", port=4455, password="", timeout=5
+        )
+
+    def test_connect_reports_clean_timeout_when_port_never_opens(self) -> None:
+        controller = ObsController(ObsConfig(startup_timeout_seconds=1))
+        req_client = MagicMock()
+        fake_module = SimpleNamespace(ReqClient=req_client)
+
+        with patch.dict("sys.modules", {"obsws_python": fake_module}), patch(
+            "video_agent.obs_controller.time.monotonic", side_effect=[0, 0, 2]
+        ), patch.object(
+            controller, "_is_websocket_port_open", return_value=False
+        ), patch.object(
+            controller, "_dismiss_recovery_dialog_if_present"
+        ), patch(
+            "video_agent.obs_controller.time.sleep"
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "OBS WebSocket 127.0.0.1:4455 did not become ready within 1 seconds"
+            ):
+                controller.connect()
+
+        req_client.assert_not_called()
+
     def test_recovery_dialog_chooses_normal_start_only_when_both_choices_exist(self) -> None:
         safe = RecoveryControl("以安全模式运行")
         normal = RecoveryControl("以正常模式运行")
