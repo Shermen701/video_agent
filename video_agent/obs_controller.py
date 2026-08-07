@@ -434,11 +434,19 @@ class ObsController:
         return False
 
     def _wait_for_recording_state(self, active: bool) -> None:
-        deadline = time.monotonic() + self.config.startup_timeout_seconds
+        timeout_seconds = (
+            self.config.startup_timeout_seconds
+            if active
+            else self.config.recording_stop_timeout_seconds
+        )
+        deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             status = self._client.get_record_status()  # type: ignore[union-attr]
             if getattr(status, "output_active", False) is active:
                 return
             time.sleep(0.5)
         state = "start" if active else "stop"
-        raise RuntimeError(f"{ErrorCode.OBS_WEBSOCKET_FAILED.value}: OBS recording did not {state}")
+        raise RuntimeError(
+            f"{ErrorCode.OBS_WEBSOCKET_FAILED.value}: OBS recording did not {state} "
+            f"within {timeout_seconds} seconds"
+        )

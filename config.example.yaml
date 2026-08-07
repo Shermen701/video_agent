@@ -47,6 +47,7 @@ obs:
   websocket_port: 4455
   websocket_password: ""
   startup_timeout_seconds: 90
+  recording_stop_timeout_seconds: 180
   recordings_dir: "recordings"
   # 录制期间自动静音 OBS 的麦克风/Aux，结束后恢复原状态。
   mute_microphone_during_recording: true
@@ -69,6 +70,8 @@ providers:
     window_title_regex: "腾讯会议|Tencent Meeting"
     login_retry_count: 2
     join_retry_count: 2
+    pre_join_settings_timeout_seconds: 8
+    pre_join_settings_retry_count: 2
     meeting_end_poll_seconds: 5
     meeting_window_reconnect_seconds: 5
     capture_health_check_seconds: 5

@@ -63,6 +63,24 @@ class FakeControl:
         return self._rect
 
 
+class FakeCheckbox:
+    def __init__(self, label: str, checked: bool) -> None:
+        self.label = label
+        self.checked = checked
+        self.clicks = 0
+        self.element_info = SimpleNamespace(name=label, control_type="CheckBox")
+
+    def window_text(self) -> str:
+        return self.label
+
+    def get_toggle_state(self) -> int:
+        return int(self.checked)
+
+    def click_input(self) -> None:
+        self.clicks += 1
+        self.checked = not self.checked
+
+
 class TencentMeetingProviderTest(unittest.TestCase):
     def test_capture_target_uses_the_current_tencent_meeting_window(self) -> None:
         provider = TencentMeetingProvider({})
@@ -229,6 +247,18 @@ class TencentMeetingProviderTest(unittest.TestCase):
 
         self.assertEqual(events, ["guide", "phone", "form", "password_mode", "edits", "fill", "submit"])
 
+    def test_login_completion_retries_when_old_uia_window_becomes_invalid(self) -> None:
+        provider = TencentMeetingProvider({"login_result_timeout_seconds": 2})
+
+        with patch.object(provider, "_connect_window"), patch.object(
+            provider, "_has_text", return_value=False
+        ), patch.object(provider, "_is_login_page", return_value=False), patch.object(
+            provider, "_edit_controls", side_effect=[OSError("stale UIA window"), []]
+        ) as edits, patch("video_agent.providers.tencent_meeting.time.sleep"):
+            self.assertTrue(provider._wait_until_login_complete())
+
+        self.assertEqual(edits.call_count, 2)
+
     def test_login_edit_uses_keyboard_events_for_form_validation(self) -> None:
         edit = FakeEdit()
 
@@ -313,11 +343,77 @@ class TencentMeetingProviderTest(unittest.TestCase):
         ), patch.object(
             provider, "_select_computer_audio_if_present", side_effect=lambda: events.append("audio")
         ), patch.object(
-            provider, "_click_if_present", side_effect=lambda names: events.append(names[0])
+            provider,
+            "_invoke_exact_button_if_present",
+            side_effect=lambda name: events.append(name) or name == "关闭麦克风",
         ):
             provider.prepare_audio_video()
 
-        self.assertEqual(events, ["meeting", "audio", "静音", "关闭视频"])
+        self.assertEqual(events, ["meeting", "audio", "关闭麦克风", "关闭视频"])
+
+    def test_prepare_never_invokes_actions_that_enable_microphone_or_video(self) -> None:
+        provider = TencentMeetingProvider({})
+        actions: list[str] = []
+
+        with patch.object(provider, "_ensure_pywinauto"), patch.object(
+            provider, "_connect_in_meeting_window", return_value=True
+        ), patch.object(provider, "_select_computer_audio_if_present"), patch.object(
+            provider,
+            "_invoke_exact_button_if_present",
+            side_effect=lambda name: actions.append(name) or False,
+        ):
+            provider.prepare_audio_video()
+
+        self.assertEqual(actions, ["关闭麦克风", "静音", "关闭视频"])
+        self.assertNotIn("解除静音", actions)
+        self.assertNotIn("开启麦克风", actions)
+        self.assertNotIn("开启视频", actions)
+
+    def test_pre_join_settings_disable_microphone_and_camera_and_enable_audio(self) -> None:
+        microphone = FakeCheckbox("入会开启麦克风", True)
+        camera = FakeCheckbox("入会开启摄像头", True)
+        computer_audio = FakeCheckbox("入会时使用电脑音频", False)
+        settings = SimpleNamespace(descendants=lambda: [microphone, camera, computer_audio])
+
+        with patch("video_agent.providers.tencent_meeting.time.sleep"):
+            TencentMeetingProvider._ensure_settings_checkbox(
+                settings, "入会开启麦克风", desired=False
+            )
+            TencentMeetingProvider._ensure_settings_checkbox(
+                settings, "入会开启摄像头", desired=False
+            )
+            TencentMeetingProvider._ensure_settings_checkbox(
+                settings, "入会时使用电脑音频", desired=True
+            )
+
+        self.assertFalse(microphone.checked)
+        self.assertFalse(camera.checked)
+        self.assertTrue(computer_audio.checked)
+        self.assertEqual((microphone.clicks, camera.clicks, computer_audio.clicks), (1, 1, 1))
+
+    def test_pre_join_settings_leave_correct_checkbox_states_unchanged(self) -> None:
+        microphone = FakeCheckbox("入会开启麦克风", False)
+        settings = SimpleNamespace(descendants=lambda: [microphone])
+
+        TencentMeetingProvider._ensure_settings_checkbox(
+            settings, "入会开启麦克风", desired=False
+        )
+
+        self.assertEqual(microphone.clicks, 0)
+
+    def test_pre_join_settings_retries_inside_the_same_task(self) -> None:
+        provider = TencentMeetingProvider({"pre_join_settings_retry_count": 2})
+
+        with patch.object(
+            provider,
+            "_configure_pre_join_media_settings_once",
+            side_effect=[RuntimeError("settings still loading"), None],
+        ) as configure, patch.object(provider, "_connect_window"), patch(
+            "video_agent.providers.tencent_meeting.time.sleep"
+        ):
+            provider._configure_pre_join_media_settings()
+
+        self.assertEqual(configure.call_count, 2)
 
     def test_destroyed_meeting_window_rebinds_before_meeting_end(self) -> None:
         provider = TencentMeetingProvider({"meeting_window_reconnect_seconds": 1})
@@ -418,6 +514,10 @@ class TencentMeetingProviderTest(unittest.TestCase):
 
         with patch.object(provider, "_ensure_pywinauto"), patch.object(
             provider, "_connect_window"
+        ), patch.object(
+            provider, "_connect_in_meeting_window", return_value=False
+        ), patch.object(
+            provider, "_configure_pre_join_media_settings", side_effect=lambda: events.append("settings")
         ), patch.object(provider, "_click_if_present", return_value=False), patch.object(
             provider, "_click_home_join_fallback", side_effect=lambda: events.append("open")
         ), patch.object(
@@ -433,7 +533,7 @@ class TencentMeetingProviderTest(unittest.TestCase):
         ):
             provider.join(MeetingInfo("274684226", "4444"))
 
-        self.assertEqual(events, ["open", "dialog", "fill:274684226", "submit", "meeting"])
+        self.assertEqual(events, ["settings", "open", "dialog", "fill:274684226", "submit", "meeting"])
 
     def test_password_prompt_fills_dedicated_password_edit_and_submits(self) -> None:
         provider = TencentMeetingProvider({})

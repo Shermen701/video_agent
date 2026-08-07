@@ -317,6 +317,20 @@ class ObsWindowCaptureTest(unittest.TestCase):
 
         self.assertFalse(any(call[0] == "mute" for call in client.calls))
 
+    def test_recording_stop_uses_its_longer_dedicated_timeout(self) -> None:
+        controller = ObsController(
+            ObsConfig(startup_timeout_seconds=5, recording_stop_timeout_seconds=180)
+        )
+        controller._client = SimpleNamespace(
+            get_record_status=lambda: SimpleNamespace(output_active=True)
+        )
+
+        with patch(
+            "video_agent.obs_controller.time.monotonic", side_effect=[0, 0, 181]
+        ), patch("video_agent.obs_controller.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "did not stop within 180 seconds"):
+                controller._wait_for_recording_state(active=False)
+
     def test_capture_health_check_rejects_repeated_pure_black_frames(self) -> None:
         controller = ObsController(ObsConfig())
         client = FakeObsClient()

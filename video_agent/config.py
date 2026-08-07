@@ -45,6 +45,8 @@ class ObsConfig:
     # OBS may take over 25 seconds to load video and the WebSocket plugin on a
     # cold Windows start.  Keep the agent from failing a healthy launch early.
     startup_timeout_seconds: int = 45
+    # Large recordings may need extra time for OBS to finalize the output file.
+    recording_stop_timeout_seconds: int = 180
     recordings_dir: str = "recordings"
     # Prevent OBS's global Mic/Aux devices from being mixed into recordings.
     # Their previous mute state is restored after each recording.

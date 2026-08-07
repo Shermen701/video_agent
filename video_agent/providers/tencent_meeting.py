@@ -70,6 +70,10 @@ class TencentMeetingProvider(MeetingProvider):
 
     def join(self, meeting: MeetingInfo) -> None:
         self._ensure_pywinauto()
+        self._connect_window(timeout_seconds=5)
+        if self._connect_in_meeting_window(timeout_seconds=1):
+            return
+        self._configure_pre_join_media_settings()
         join_retry_count = int(self.config.get("join_retry_count") or 2)
         for _ in range(join_retry_count):
             self._connect_window(timeout_seconds=5)
@@ -94,8 +98,11 @@ class TencentMeetingProvider(MeetingProvider):
         if not self._connect_in_meeting_window(timeout_seconds=5):
             raise RuntimeError("meeting_join_failed: Tencent Meeting window is unavailable")
         self._select_computer_audio_if_present()
-        self._click_if_present(["静音", "解除静音", "麦克风"])
-        self._click_if_present(["关闭视频", "开启视频", "摄像头"])
+        # These labels describe actions, not current states.  Never click
+        # "解除静音" or "开启麦克风", which would enable the local microphone.
+        if not self._invoke_exact_button_if_present("关闭麦克风"):
+            self._invoke_exact_button_if_present("静音")
+        self._invoke_exact_button_if_present("关闭视频")
 
     def get_capture_target(self) -> CaptureTarget | None:
         """Bind OBS to this task's Tencent Meeting window, never a stale source."""
@@ -231,6 +238,180 @@ class TencentMeetingProvider(MeetingProvider):
                 int(top + height * float(settings_ratio[1])),
             )
         )
+
+    def _configure_pre_join_media_settings(self) -> None:
+        """Set deterministic media defaults before entering a meeting."""
+        attempts = max(1, int(self.config.get("pre_join_settings_retry_count") or 2))
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                self._configure_pre_join_media_settings_once()
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    raise
+                LOGGER.warning(
+                    "Tencent Meeting pre-join settings attempt failed; retrying: "
+                    "attempt=%s/%s error=%s",
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                time.sleep(1)
+                try:
+                    self._connect_window(timeout_seconds=5)
+                except RuntimeError:
+                    pass
+        if last_error is not None:
+            raise last_error
+
+    def _configure_pre_join_media_settings_once(self) -> None:
+        from pywinauto import Desktop  # type: ignore
+
+        self._open_home_settings()
+        timeout_seconds = float(self.config.get("pre_join_settings_timeout_seconds") or 8)
+        settings = self._wait_for_settings_window(Desktop(backend="uia"), timeout_seconds)
+        if settings is None:
+            raise RuntimeError("meeting_join_failed: Tencent Meeting settings window did not open")
+        try:
+            common = self._wait_for_exact_control(
+                settings, "常规设置", "CheckBox", timeout_seconds
+            )
+            if common is None:
+                raise RuntimeError(
+                    "meeting_join_failed: Tencent Meeting general settings control not found"
+                )
+            common.click_input()
+            self._ensure_settings_checkbox(
+                settings, "入会开启麦克风", desired=False, timeout_seconds=timeout_seconds
+            )
+            self._ensure_settings_checkbox(
+                settings, "入会开启摄像头", desired=False, timeout_seconds=timeout_seconds
+            )
+            self._ensure_settings_checkbox(
+                settings, "入会时使用电脑音频", desired=True, timeout_seconds=timeout_seconds
+            )
+        finally:
+            self._close_settings_window(settings)
+        self._connect_window(timeout_seconds=5)
+
+    @staticmethod
+    def _wait_for_settings_window(desktop: Any, timeout_seconds: float) -> Any | None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                for window in desktop.windows():
+                    if str(window.element_info.automation_id or "") == "QApplication.SettingPanelDialog":
+                        return window
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return None
+
+    @classmethod
+    def _ensure_settings_checkbox(
+        cls,
+        settings: Any,
+        label: str,
+        *,
+        desired: bool,
+        timeout_seconds: float = 3,
+    ) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        found_control = False
+        found_state = False
+        clicked = False
+        while time.monotonic() < deadline:
+            checkbox = cls._find_exact_control(settings, label, "CheckBox")
+            if checkbox is None:
+                time.sleep(0.2)
+                continue
+            found_control = True
+            current = cls._checkbox_state(checkbox)
+            if current is None:
+                time.sleep(0.2)
+                continue
+            found_state = True
+            if current is desired:
+                return
+            if not clicked:
+                checkbox.click_input()
+                clicked = True
+            time.sleep(0.2)
+        if not found_control:
+            raise RuntimeError(
+                f"meeting_join_failed: Tencent Meeting setting not found: {label}"
+            )
+        if not found_state:
+            raise RuntimeError(
+                f"meeting_join_failed: Tencent Meeting setting state is unavailable: {label}"
+            )
+        raise RuntimeError(
+            f"meeting_join_failed: Tencent Meeting setting did not change: {label}"
+        )
+
+    @staticmethod
+    def _checkbox_state(checkbox: Any) -> bool | None:
+        try:
+            state = int(checkbox.get_toggle_state())
+        except Exception:
+            try:
+                state = int(checkbox.iface_toggle.CurrentToggleState)
+            except Exception:
+                return None
+        if state == 0:
+            return False
+        if state == 1:
+            return True
+        return None
+
+    @staticmethod
+    def _find_exact_control(root: Any, label: str, control_type: str) -> Any | None:
+        try:
+            controls = root.descendants()
+        except Exception:
+            return None
+        for control in controls:
+            try:
+                text = str(control.window_text() or "")
+                name = str(getattr(control.element_info, "name", "") or "")
+                kind = str(getattr(control.element_info, "control_type", "") or "")
+                if kind == control_type and label in {text, name}:
+                    return control
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _wait_for_exact_control(
+        cls,
+        root: Any,
+        label: str,
+        control_type: str,
+        timeout_seconds: float,
+    ) -> Any | None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            control = cls._find_exact_control(root, label, control_type)
+            if control is not None:
+                return control
+            time.sleep(0.2)
+        return None
+
+    @classmethod
+    def _close_settings_window(cls, settings: Any) -> None:
+        close_button = cls._find_exact_control(settings, "关闭", "Button")
+        if close_button is not None:
+            try:
+                close_button.invoke()
+            except Exception:
+                close_button.click_input()
+            return
+        try:
+            settings.close()
+        except Exception as exc:
+            raise RuntimeError("Tencent Meeting settings window did not close") from exc
 
     def _find_home_settings_entry(self) -> Any | None:
         """Find the settings icon as the middle item in the sidebar's bottom trio."""
@@ -704,9 +885,22 @@ class TencentMeetingProvider(MeetingProvider):
                 self._connect_window(timeout_seconds=1)
             except RuntimeError:
                 continue
-            if self._has_text(["密码错误", "登录失败", "账号不可使用", "请求超时"]):
+            try:
+                rejected = self._has_text(
+                    ["密码错误", "登录失败", "账号不可使用", "请求超时"]
+                )
+                login_page = self._is_login_page()
+                edit_count = len(self._edit_controls())
+            except Exception:
+                # Tencent replaces its top-level UIA element after a successful
+                # login.  The old wrapper can become invalid between reconnect
+                # and descendant enumeration; retry against the new window.
+                self.window = None
+                self.app = None
+                continue
+            if rejected:
                 raise RuntimeError("Tencent Meeting login was rejected")
-            if not self._is_login_page() and len(self._edit_controls()) < 2:
+            if not login_page and edit_count < 2:
                 return True
         return False
 
