@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 import time
@@ -11,6 +12,9 @@ from video_agent.app_discovery import find_tencent_meeting_executable
 from video_agent.models import CaptureTarget, Credentials, MeetingInfo
 from video_agent.process_control import shutdown_matching_processes
 from video_agent.providers.base import MeetingProvider
+
+
+LOGGER = logging.getLogger("video_agent")
 
 
 class TencentMeetingProvider(MeetingProvider):
@@ -87,7 +91,8 @@ class TencentMeetingProvider(MeetingProvider):
 
     def prepare_audio_video(self) -> None:
         self._ensure_pywinauto()
-        self._connect_in_meeting_window(timeout_seconds=5)
+        if not self._connect_in_meeting_window(timeout_seconds=5):
+            raise RuntimeError("meeting_join_failed: Tencent Meeting window is unavailable")
         self._select_computer_audio_if_present()
         self._click_if_present(["静音", "解除静音", "麦克风"])
         self._click_if_present(["关闭视频", "开启视频", "摄像头"])
@@ -113,6 +118,10 @@ class TencentMeetingProvider(MeetingProvider):
     def wait_until_finished(self, deadline: datetime) -> None:
         poll_seconds = int(self.config.get("meeting_end_poll_seconds") or 5)
         while datetime.now(deadline.tzinfo).astimezone() < deadline:
+            # The computer-audio prompt can appear after recording has already
+            # started, for example when the host admits a waiting-room client.
+            if self._invoke_exact_button_if_present("使用电脑音频"):
+                LOGGER.info("Tencent Meeting computer audio enabled after admission")
             if self._meeting_has_finished():
                 return
             time.sleep(poll_seconds)
@@ -303,6 +312,13 @@ class TencentMeetingProvider(MeetingProvider):
             except Exception:
                 handle = 0
             if handle and not self._window_exists(handle):
+                # Tencent Meeting may replace the top-level in-meeting window
+                # during a page transition. Rebind before treating the
+                # destroyed handle as meeting end.
+                if self._connect_in_meeting_window(
+                    timeout_seconds=int(self.config.get("meeting_window_reconnect_seconds") or 5)
+                ):
+                    return False
                 return self._finalize_meeting_end()
             if handle:
                 if self._window_has_end_text(self.meeting_window):

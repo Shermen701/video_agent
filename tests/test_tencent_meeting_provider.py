@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from video_agent.models import CaptureTarget, Credentials, MeetingInfo
+from video_agent.models import CaptureTarget, Credentials, MeetingInfo, utc_now
 from video_agent.providers.tencent_meeting import TencentMeetingProvider
 
 
@@ -263,6 +264,8 @@ class TencentMeetingProviderTest(unittest.TestCase):
         provider.meeting_window = SimpleNamespace(handle=123)
 
         with patch.object(provider, "_window_exists", return_value=False), patch.object(
+            provider, "_connect_in_meeting_window", return_value=False
+        ), patch.object(
             provider, "_dismiss_after_meeting_dialog_if_present"
         ) as dismiss:
             self.assertTrue(provider._meeting_has_finished())
@@ -306,7 +309,7 @@ class TencentMeetingProviderTest(unittest.TestCase):
         events: list[str] = []
 
         with patch.object(provider, "_ensure_pywinauto"), patch.object(
-            provider, "_connect_in_meeting_window", side_effect=lambda **_kwargs: events.append("meeting")
+            provider, "_connect_in_meeting_window", side_effect=lambda **_kwargs: events.append("meeting") or True
         ), patch.object(
             provider, "_select_computer_audio_if_present", side_effect=lambda: events.append("audio")
         ), patch.object(
@@ -315,6 +318,27 @@ class TencentMeetingProviderTest(unittest.TestCase):
             provider.prepare_audio_video()
 
         self.assertEqual(events, ["meeting", "audio", "静音", "关闭视频"])
+
+    def test_destroyed_meeting_window_rebinds_before_meeting_end(self) -> None:
+        provider = TencentMeetingProvider({"meeting_window_reconnect_seconds": 1})
+        provider.meeting_window = SimpleNamespace(handle=123)
+
+        with patch.object(provider, "_window_exists", return_value=False), patch.object(
+            provider, "_connect_in_meeting_window", return_value=True
+        ), patch.object(provider, "_finalize_meeting_end") as finalize:
+            self.assertFalse(provider._meeting_has_finished())
+
+        finalize.assert_not_called()
+
+    def test_recording_loop_accepts_late_computer_audio_prompt(self) -> None:
+        provider = TencentMeetingProvider({})
+
+        with patch.object(
+            provider, "_invoke_exact_button_if_present", return_value=True
+        ) as audio, patch.object(provider, "_meeting_has_finished", return_value=True):
+            provider.wait_until_finished(utc_now() + timedelta(minutes=1))
+
+        audio.assert_called_once_with("使用电脑音频")
 
     def test_computer_audio_prompt_is_optional(self) -> None:
         provider = TencentMeetingProvider({"computer_audio_prompt_timeout_seconds": 0.01})

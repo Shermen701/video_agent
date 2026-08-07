@@ -70,6 +70,7 @@ providers:
     login_retry_count: 2
     join_retry_count: 2
     meeting_end_poll_seconds: 5
+    meeting_window_reconnect_seconds: 5
     capture_health_check_seconds: 5
   dingtalk:
     executable_path: ""
