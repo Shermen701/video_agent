@@ -21,6 +21,10 @@ CAPTURE_SCENE_NAME = "VideoAgent-DingTalk"
 CAPTURE_INPUT_NAME = "VideoAgent-DingTalk-Window"
 CAPTURE_AUDIO_INPUT_NAME = "VideoAgent-Application-Audio"
 APPLICATION_AUDIO_CAPTURE_KIND = "wasapi_process_output_capture"
+MICROPHONE_CAPTURE_KINDS = {
+    "wasapi_input_capture",
+    "wasapi_input_capture_v2",
+}
 
 LOGGER = logging.getLogger("video_agent")
 
@@ -30,6 +34,7 @@ class ObsController:
         self.config = config
         self._client = None
         self._previous_scene: str | None = None
+        self._microphone_mute_states: dict[str, bool] | None = None
 
     def ensure_running(self) -> None:
         if self._is_websocket_port_open():
@@ -115,11 +120,16 @@ class ObsController:
         self._require_client()
         task_dir = task_dir.resolve()
         task_dir.mkdir(parents=True, exist_ok=True)
-        self._client.set_record_directory(str(task_dir))  # type: ignore[union-attr]
-        status = self._client.get_record_status()  # type: ignore[union-attr]
-        if not getattr(status, "output_active", False):
-            self._client.start_record()  # type: ignore[union-attr]
-            self._wait_for_recording_state(active=True)
+        self._mute_microphone_inputs()
+        try:
+            self._client.set_record_directory(str(task_dir))  # type: ignore[union-attr]
+            status = self._client.get_record_status()  # type: ignore[union-attr]
+            if not getattr(status, "output_active", False):
+                self._client.start_record()  # type: ignore[union-attr]
+                self._wait_for_recording_state(active=True)
+        except Exception:
+            self._restore_microphone_inputs()
+            raise
 
     def configure_window_capture(self, target: CaptureTarget) -> None:
         """Switch OBS to a reusable scene that captures one native window."""
@@ -299,10 +309,13 @@ class ObsController:
 
     def stop_recording(self) -> None:
         self._require_client()
-        status = self._client.get_record_status()  # type: ignore[union-attr]
-        if getattr(status, "output_active", False):
-            self._client.stop_record()  # type: ignore[union-attr]
-            self._wait_for_recording_state(active=False)
+        try:
+            status = self._client.get_record_status()  # type: ignore[union-attr]
+            if getattr(status, "output_active", False):
+                self._client.stop_record()  # type: ignore[union-attr]
+                self._wait_for_recording_state(active=False)
+        finally:
+            self._restore_microphone_inputs()
 
     def find_latest_recording(self, task_dir: Path) -> Path | None:
         files = [path for path in task_dir.glob("*") if path.is_file() and path.suffix.lower() in {".mp4", ".mkv", ".mov", ".flv"}]
@@ -313,6 +326,56 @@ class ObsController:
     def _require_client(self) -> None:
         if self._client is None:
             raise RuntimeError(f"{ErrorCode.OBS_WEBSOCKET_FAILED.value}: OBS websocket is not connected")
+
+    def _mute_microphone_inputs(self) -> None:
+        """Mute OBS microphone devices while preserving their prior states."""
+        if not self.config.mute_microphone_during_recording:
+            return
+        if self._microphone_mute_states is not None:
+            return
+
+        states: dict[str, bool] = {}
+        try:
+            inputs = self._client.get_input_list().inputs  # type: ignore[union-attr]
+            for item in inputs:
+                name = self._input_field(item, "inputName", "input_name")
+                kind = self._input_field(item, "inputKind", "input_kind")
+                if not name or kind not in MICROPHONE_CAPTURE_KINDS:
+                    continue
+                response = self._client.get_input_mute(name)  # type: ignore[union-attr]
+                was_muted = bool(getattr(response, "input_muted", False))
+                states[name] = was_muted
+                if not was_muted:
+                    self._client.set_input_mute(name, True)  # type: ignore[union-attr]
+        except Exception as exc:
+            for name, was_muted in states.items():
+                try:
+                    self._client.set_input_mute(name, was_muted)  # type: ignore[union-attr]
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"recording_failed: failed to mute OBS microphone source: {exc}"
+            ) from exc
+
+        self._microphone_mute_states = states
+        LOGGER.info("OBS microphone capture disabled for recording: sources=%s", len(states))
+
+    def _restore_microphone_inputs(self) -> None:
+        states = self._microphone_mute_states
+        if states is None:
+            return
+        self._microphone_mute_states = None
+        for name, was_muted in states.items():
+            try:
+                self._client.set_input_mute(name, was_muted)  # type: ignore[union-attr]
+            except Exception:
+                LOGGER.exception("failed to restore OBS microphone source state: name=%s", name)
+
+    @staticmethod
+    def _input_field(item: object, dict_key: str, attribute: str) -> str:
+        if isinstance(item, dict):
+            return str(item.get(dict_key, "") or "")
+        return str(getattr(item, attribute, "") or "")
 
     def _is_websocket_port_open(self) -> bool:
         try:

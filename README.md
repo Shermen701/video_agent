@@ -30,6 +30,8 @@ py -m video_agent.agent --config .\config.yaml
 .\build_exe.bat
 ```
 
+配置、部署和各录制平台的路径说明见 [配置操作手册.md](配置操作手册.md)。
+
 生成文件位于 `dist\video_agent.exe`。直接运行 exe 时会使用桌面固定目录 `Desktop\VideoAgent`，首次运行会生成 `config.yaml`、`config\*.pem`、`recordings` 和 `logs`；后续启动会继续读取桌面目录中的 `config.yaml`。录制视频固定保存到 `Desktop\VideoAgent\recordings`。
 
 检查 OBS / 腾讯会议 / 钉钉安装路径：

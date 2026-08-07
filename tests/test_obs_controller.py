@@ -71,6 +71,50 @@ class FakeObsClient:
         return SimpleNamespace(image_data=self.screenshots.pop(0))
 
 
+class FakeRecordingClient:
+    def __init__(self) -> None:
+        self.recording = False
+        self.mute_states = {"Mic/Aux": False, "Muted microphone": True}
+        self.calls: list[tuple] = []
+
+    def get_input_list(self):
+        return SimpleNamespace(
+            inputs=[
+                {"inputName": "Mic/Aux", "inputKind": "wasapi_input_capture"},
+                {
+                    "inputName": "Muted microphone",
+                    "inputKind": "wasapi_input_capture_v2",
+                },
+                {"inputName": "Desktop Audio", "inputKind": "wasapi_output_capture"},
+                {
+                    "inputName": CAPTURE_AUDIO_INPUT_NAME,
+                    "inputKind": APPLICATION_AUDIO_CAPTURE_KIND,
+                },
+            ]
+        )
+
+    def get_input_mute(self, name):
+        return SimpleNamespace(input_muted=self.mute_states[name])
+
+    def set_input_mute(self, name, muted):
+        self.calls.append(("mute", name, muted))
+        self.mute_states[name] = muted
+
+    def set_record_directory(self, path):
+        self.calls.append(("directory", path))
+
+    def get_record_status(self):
+        return SimpleNamespace(output_active=self.recording)
+
+    def start_record(self):
+        self.calls.append(("start",))
+        self.recording = True
+
+    def stop_record(self):
+        self.calls.append(("stop",))
+        self.recording = False
+
+
 class RecoveryControl:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -245,6 +289,33 @@ class ObsWindowCaptureTest(unittest.TestCase):
         create = next(call for call in client.calls if call[0] == "create_input")
         self.assertEqual(create[1:4], (CAPTURE_SCENE_NAME, CAPTURE_AUDIO_INPUT_NAME, APPLICATION_AUDIO_CAPTURE_KIND))
         self.assertEqual(create[4]["window"], "抖音直播:Chrome_WidgetWin_1:chrome.exe")
+
+    def test_recording_mutes_only_microphones_and_restores_previous_states(self) -> None:
+        controller = ObsController(ObsConfig(mute_microphone_during_recording=True))
+        client = FakeRecordingClient()
+        controller._client = client
+
+        controller.start_recording(Path("test_outputs/obs/microphone-muted"))
+
+        self.assertTrue(client.mute_states["Mic/Aux"])
+        self.assertTrue(client.mute_states["Muted microphone"])
+        self.assertNotIn(("mute", "Desktop Audio", True), client.calls)
+        self.assertNotIn(("mute", CAPTURE_AUDIO_INPUT_NAME, True), client.calls)
+
+        controller.stop_recording()
+
+        self.assertFalse(client.mute_states["Mic/Aux"])
+        self.assertTrue(client.mute_states["Muted microphone"])
+
+    def test_microphone_muting_can_be_disabled_by_config(self) -> None:
+        controller = ObsController(ObsConfig(mute_microphone_during_recording=False))
+        client = FakeRecordingClient()
+        controller._client = client
+
+        controller.start_recording(Path("test_outputs/obs/microphone-allowed"))
+        controller.stop_recording()
+
+        self.assertFalse(any(call[0] == "mute" for call in client.calls))
 
     def test_capture_health_check_rejects_repeated_pure_black_frames(self) -> None:
         controller = ObsController(ObsConfig())

@@ -46,8 +46,10 @@ obs:
   websocket_host: "127.0.0.1"
   websocket_port: 4455
   websocket_password: ""
-  startup_timeout_seconds: 45
+  startup_timeout_seconds: 90
   recordings_dir: "recordings"
+  # 录制期间自动静音 OBS 的麦克风/Aux，结束后恢复原状态。
+  mute_microphone_during_recording: true
 
 upload:
   part_size_bytes: 5242880

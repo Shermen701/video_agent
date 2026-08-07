@@ -46,6 +46,9 @@ class ObsConfig:
     # cold Windows start.  Keep the agent from failing a healthy launch early.
     startup_timeout_seconds: int = 45
     recordings_dir: str = "recordings"
+    # Prevent OBS's global Mic/Aux devices from being mixed into recordings.
+    # Their previous mute state is restored after each recording.
+    mute_microphone_during_recording: bool = True
 
 
 @dataclass(frozen=True)
